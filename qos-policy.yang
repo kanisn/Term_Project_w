@@ -1,0 +1,14 @@
+module qos-policy {
+  namespace "http://hahaha.com/qos";
+  prefix qos;
+
+  container qos-policies {
+    list policy {
+      key "name";
+      leaf name { type string; }
+      leaf priority { type uint8; }
+      leaf bandwidth-limit { type uint32; } // Mbps
+    }
+  }
+}
+
