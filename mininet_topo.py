@@ -1,60 +1,98 @@
-# mininet_topo.py
-#
-# Simple Mininet topology:
-#  - 1 switch, 3 hosts (h1, h2, h3)
-#  - Each host will run an iperf server on different ports for demo:
-#       h1: video -> port 5001
-#       h2: download -> port 5002
-#       h3: background -> port 5003
-#
-# Usage: sudo python3 mininet_topo.py
-#
-from mininet.topo import Topo
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSSwitch
-from mininet.cli import CLI
+from mininet.node import RemoteController, OVSKernelSwitch
+from mininet.link import TCLink  # TC(Traffic Control) 기반 링크
+from mininet.cli import CLI      # CLI(Command Line Interface)
 from mininet.log import setLogLevel, info
-import time
 
-class SimpleQoSTopo(Topo):
-    def build(self):
-        s1 = self.addSwitch('s1')
-        h1 = self.addHost('h1', ip='10.0.0.1')
-        h2 = self.addHost('h2', ip='10.0.0.2')
-        h3 = self.addHost('h3', ip='10.0.0.3')
-        self.addLink(h1, s1)
-        self.addLink(h2, s1)
-        self.addLink(h3, s1)
+def video_download_topology():
+    """
+    구조 요약:
+      - h1: 비디오 시청 사용자 (Video User)
+      - h2: 파일 다운로드 사용자 (Download User)
+      - vSrv: 비디오 서버 (Video Server)
+      - dSrv: 다운로드 서버 (Download Server)
+      - s1: 사용자 쪽 액세스 스위치 (Access Switch)
+      - s2: 서버 쪽 스위치 (Server Switch)
+      - s1 ↔ s2 구간을 10Mbps 병목 링크(Bottleneck Link)로 설정
 
-def start_network():
-    setLogLevel('info')
-    topo = SimpleQoSTopo()
-    # Connect to remote Ryu controller (default at 127.0.0.1:6653)
-    c0 = RemoteController('c0', ip='127.0.0.1', port=6653) # 创建一个名为 c0 的控制器对象。它连接到 本地主机 (127.0.0.1) 上的 6653 端口，这是 Ryu 等 SDN 控制器的默认 OpenFlow 端口。
-    # 实例化 Mininet。topo：使用定义的拓扑；controller：使用远程控制器 c0；switch：使用 OVSSwitch（Open vSwitch）
-    net = Mininet(topo=topo, controller=c0, switch=OVSSwitch)
-    # 执行所有配置，创建虚拟主机、交换机和链接，并让交换机连接到控制器。
+      모든 호스트는 같은 IP 대역(10.0.0.0/24)을 사용하고,
+      스위치는 L2 스위치이므로 라우터 없이도 통신 가능.
+    """
+
+    net = Mininet(
+        controller=RemoteController,
+        switch=OVSKernelSwitch,
+        link=TCLink,          # bw, delay, loss 같은 QoS 설정 가능
+        autoSetMacs=True,
+        autoStaticArp=True
+    )
+
+    info('*** Adding controller\n')
+    # Ryu Controller를 localhost에서 실행한다고 가정 (포트 6633)
+    # 기존 코드나 Ryu 실행 시 포트가 6653인 경우, ryu-manager 실행 옵션이나 이곳을 맞춰야 합니다.
+    c0 = net.addController(
+        'c0',
+        controller=RemoteController,
+        ip='127.0.0.1',
+        port=6633
+    )
+
+    info('*** Adding hosts (users)\n')
+    # 같은 LAN 대역: 10.0.0.0/24
+    h1 = net.addHost('h1', ip='10.0.0.1/24')   # 비디오 클라이언트
+    h2 = net.addHost('h2', ip='10.0.0.2/24')   # 다운로드 클라이언트
+
+    info('*** Adding servers\n')
+    vSrv = net.addHost('vSrv', ip='10.0.0.10/24')  # 비디오 서버
+    dSrv = net.addHost('dSrv', ip='10.0.0.20/24')  # 다운로드 서버
+
+    info('*** Adding switches\n')
+    s1 = net.addSwitch('s1')  # 사용자 쪽 스위치
+    s2 = net.addSwitch('s2')  # 서버 쪽 스위치
+
+    info('*** Creating links\n')
+    # 사용자 ↔ s1: > 100Mbps (충분히 넓은 링크)
+    net.addLink(h1, s1)
+    net.addLink(h2, s1)
+
+    # s1 ↔ s2: 10Mbps 병목 링크 (여기가 혼잡 구간)
+    net.addLink(s1, s2, bw=10)
+
+    # 서버 ↔ s2: > 100Mbps (서버 쪽은 넉넉한 대역폭)
+    net.addLink(vSrv, s2)
+    net.addLink(dSrv, s2)
+
+    info('*** Starting network\n')
     net.start()
-    # 打印网络启动成功的消息。
-    info("Network started. Launching iperf servers on ports 5001/5002/5003...\n")
 
-    # 从 Mininet 实例中获取 h1, h2, h3 的 Python 对象，以便在其上执行命令。
-    h1, h2, h3 = net.get('h1', 'h2', 'h3')
-
-
-    # 在主机 h1 上启动 iperf 服务器 (-s)，监听 5001 端口 (用于 video 流量分类)。nohup ... & 使其在后台持续运行，并将输出重定向到 /tmp/iperf_h1.log。
-    h1.cmd('nohup iperf -s -p 5001 > /tmp/iperf_h1.log 2>&1 &')
-    # 在主机 h2 上启动 iperf 服务器，监听 5002 端口 (用于 download 流量分类)。
+    # --- iperf 서버(수신자) 자동 실행 ---
+    # h1, h2가 데이터를 받을 준비를 합니다.
+    info('*** Starting iperf servers (Receivers) on h1 (video user) and h2 (download user)\n')
+    
+    # h1 (Video User): UDP 수신 대기 (Port 5001)
+    # -s: Server mode (수신)
+    # -u: UDP
+    # -p 5001: Port 5001
+    h1.cmd('nohup iperf -s -u -p 5001 > /tmp/iperf_h1.log 2>&1 &')
+    
+    # h2 (Download User): TCP 수신 대기 (Port 5002)
+    # -s: Server mode (수신)
+    # -p 5002: Port 5002
     h2.cmd('nohup iperf -s -p 5002 > /tmp/iperf_h2.log 2>&1 &')
-    # 在主机 h3 上启动 iperf 服务器，监听 5003 端口 (用于 background 流量分类)。
-    h3.cmd('nohup iperf -s -p 5003 > /tmp/iperf_h3.log 2>&1 &')
 
-    info("Iperf servers started. You can run clients from other hosts, e.g. from h4 (or from h1->h2):\n")
-    info("Example: h1 iperf -c 10.0.0.2 -p 5002 -t 10\n")
+    info('*** iperf receivers started:\n')
+    info('    - h1 (Video User):   Listening UDP on port 5001\n')
+    info('    - h2 (Download User): Listening TCP on port 5002\n')
 
-    # 暂停脚本执行，进入 Mininet 交互式命令行界面，用户可以在这里运行流量客户端 (如 h1 iperf -c 10.0.0.2 -p 5002 -t 10)。
-    CLI(net)
-    net.stop()# 当用户退出 CLI 后，关闭并清理所有虚拟网络组件。
+    info('*** Network is ready. Use "xterm vSrv dSrv" to generate traffic.\n')
+    CLI(net)   # Mininet CLI 진입
+
+    info('*** Stopping network\n')
+    net.stop()
 
 if __name__ == '__main__':
-    start_network()
+    setLogLevel('info')
+    video_download_topology()

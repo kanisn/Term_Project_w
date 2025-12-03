@@ -1,73 +1,124 @@
 #!/usr/bin/env python3
-import random, json, time, os
-import requests # 需要导入 requests
-import sys # 引入 sys
+# -*- coding: utf-8 -*-
 
-# --- 新增配置 ---
-DECISION_ENGINE_URL = "http://127.0.0.1:5000/metrics" # 新决策服务器的地址
-HEADERS = {'Content-Type': 'application/json'}
+import json
+import time
+import os
+import requests
+import csv
+from datetime import datetime
+from collections import deque
 
-# --- 定义网络场景 ---
-# 场景 (duration_s, load_range, delay_range, loss_range)
-# load_range: (min, max) 流量负载 (1.0 视为满载)
-# delay_range: (min, max) 延迟 (ms)
-# loss_range: (min, max) 丢包率
-SCENARIOS = [
-    # 场景 1: 正常工作负载 (Low Load)
-    ("Low Load (Normal)", 20, (0.4, 0.6), (20, 50), (0.001, 0.005)),
-    # 场景 2: 视频流高峰 (High Load - Video Streaming)， 拥塞
-    ("Video Surge (High Load)", 30, (0.85, 1.1), (80, 150), (0.005, 0.02)),
-    # 场景 3: 视频流 + 大文件下载 (Severe Congestion), 严重拥塞
-    ("Congestion (Video + Download)", 40, (1.1, 1.4), (150, 250), (0.02, 0.05)),
-    # 场景 4: 负载降低，网络恢复
-    ("Recovery (Moderate Load)", 20, (0.6, 0.85), (50, 100), (0.003, 0.01)),
-]
+# 설정
+RYU_STATS_URL = "http://127.0.0.1:8080/stats"
+DECISION_ENGINE_URL = "http://127.0.0.1:5000/metrics"
+LOG_JSON_FILE = "latest_metrics.json"
+LOG_CSV_FILE = "network_traffic.csv"
 
+# Moving Average를 위한 큐 (최근 3개)
+history_video_loss = deque(maxlen=3)
+history_video_bps = deque(maxlen=3)
+history_dl_bps = deque(maxlen=3)
 
-def get_metrics(load_range, delay_range, loss_range):
-    """根据范围生成模拟指标"""
-    return {
-        "traffic_load": round(random.uniform(*load_range), 2),
-        "delay_ms": round(random.uniform(*delay_range), 1),
-        "packet_loss": round(random.uniform(*loss_range), 3)
-    }
+def init_files():
+    """CSV 헤더 생성 및 JSON 초기화"""
+    # JSON 초기화
+    with open(LOG_JSON_FILE, 'w') as f:
+        json.dump([], f)
+    
+    # CSV 초기화: 모드 'w'로 열어서 항상 새로 작성 (헤더 포함)
+    with open(LOG_CSV_FILE, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "vid_rx_mbps", "vid_tx_mbps", "vid_loss_mbps", "vid_loss_percent", "dl_rx_mbps", "dl_tx_mbps", "delay_ms"])
+    
+    print(f"[INIT] Files initialized (CSV Header Created).")
 
-def send_metrics(metrics):
-    """将指标直接发送到决策引擎的 REST API"""
-    try:
-        r = requests.post(DECISION_ENGINE_URL, json=metrics, headers=HEADERS, timeout=2)
-        if r.status_code != 200:
-            print(f"[REST CLIENT ERROR] Server responded with status {r.status_code}")
-    except requests.exceptions.ConnectionError:
-        print("[REST CLIENT ERROR] Could not connect to Decision Engine (Port 5000). Is it running?")
-    except Exception as e:
-        print(f"[REST CLIENT ERROR] An error occurred: {e}")
+def estimate_delay(traffic_load_mbps):
+    """트래픽 부하에 따른 지연시간 추정 (10Mbps 링크 기준)"""
+    LINK_CAPACITY = 10.0
+    base_delay = 5.0
+    
+    if traffic_load_mbps >= LINK_CAPACITY:
+        return 500.0 + (traffic_load_mbps - LINK_CAPACITY) * 100
+    elif traffic_load_mbps > LINK_CAPACITY * 0.9:
+        util = traffic_load_mbps / LINK_CAPACITY
+        return base_delay + (100 * util * util)
+    else:
+        return base_delay + (traffic_load_mbps * 2)
+
+def calculate_moving_average(value, queue):
+    """새 값을 큐에 넣고 평균을 반환"""
+    queue.append(value)
+    return sum(queue) / len(queue)
+
+def main():
+    init_files()
+    print(f"--- Monitoring & Parsing Started ---")
+    
+    while True:
+        try:
+            # 1. Ryu 통계 수집
+            res = requests.get(RYU_STATS_URL, timeout=1)
+            if res.status_code == 200:
+                raw = res.json()
+                
+                # --- 데이터 가공 (bps -> Mbps) ---
+                vid_rx = raw.get('video_bps', 0) / 1e6
+                vid_tx = raw.get('video_tx_bps', 0) / 1e6
+                dl_rx = raw.get('download_bps', 0) / 1e6
+                dl_tx = raw.get('download_tx_bps', 0) / 1e6
+                
+                vid_loss_mbps = raw.get('video_loss', 0) / 1e6
+                
+                # Loss % 계산
+                loss_percent = 0.0
+                if vid_tx > 0:
+                    loss_percent = (vid_loss_mbps / vid_tx) * 100
+
+                total_load = vid_rx + dl_rx
+                delay = estimate_delay(total_load)
+
+                # --- 2. CSV 저장 (Raw Data) ---
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                # Append 모드로 데이터 추가
+                with open(LOG_CSV_FILE, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        timestamp, 
+                        round(vid_rx, 2), round(vid_tx, 2), 
+                        round(vid_loss_mbps, 3), round(loss_percent, 2),
+                        round(dl_rx, 2), round(dl_tx, 2),
+                        round(delay, 1)
+                    ])
+
+                # --- 3. JSON 저장 (Moving Average 적용) ---
+                # 요구사항 4: 최근 데이터셋 3개를 무빙 에버리지 수행
+                avg_vid_loss = calculate_moving_average(loss_percent, history_video_loss)
+                
+                # JSON에는 마지막(최신 평균) 데이터만 저장
+                metrics_data = {
+                    "timestamp": timestamp,
+                    "video_mbps": round(vid_rx, 2),
+                    "download_mbps": round(dl_rx, 2),
+                    "video_loss_percent_ma": round(avg_vid_loss, 2), # 이동평균된 Loss
+                    "raw_loss_percent": round(loss_percent, 2),      # 현재 Loss
+                    "delay_ms": round(delay, 1)
+                }
+
+                with open(LOG_JSON_FILE, 'w') as f:
+                    json.dump([metrics_data], f, indent=2)
+
+                # --- 4. Decision Engine으로 전송 ---
+                # 모니터링 출력
+                print(f"[{timestamp}] Load:{total_load:.1f}M | VidLoss(MA):{avg_vid_loss:.1f}% | Push to Engine...")
+                
+                requests.post(DECISION_ENGINE_URL, json=metrics_data, timeout=1)
+
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            time.sleep(1)
 
 if __name__ == "__main__":
-    os.makedirs("logs", exist_ok=True)
-    print("--- Starting Network Metrics Simulation ---")
-
-    # 循环遍历所有预设场景
-    while True:
-        for name, duration, load_r, delay_r, loss_r in SCENARIOS[2:3]:
-            print(f"\n[SCENARIO] Entering '{name}' for {duration} seconds...")
-            start_time = time.time()
-
-            # 在每个场景内持续生成指标，直到时间结束
-            while time.time() - start_time < duration:
-                metrics = get_metrics(load_r, delay_r, loss_r)
-                # *** 关键修改：直接发送数据 ***
-                send_metrics(metrics)
-
-                # 打印当前场景和指标
-                current_time = int(time.time() - start_time)
-                print(
-                    f"[{name}]   [{current_time}s/{duration}s] "
-                    f"{{'traffic_load': {metrics['traffic_load'] * 100:.0f}%, "
-                    f"'delay': {metrics['delay_ms']}ms, "
-                    f"'packet_loss': {metrics['packet_loss'] * 100:.1f}%}}\n"
-                )
-
-                time.sleep(5) # 每 3 秒生成一次数据
-
-        print("\n[SIMULATION] Looping back to the first scenario...")
+    main()

@@ -1,1 +1,10 @@
-{"traffic_load": 1.23, "delay_ms": 157.4, "packet_loss": 0.035}
+[
+  {
+    "timestamp": "19:02:16",
+    "video_mbps": 0.0,
+    "download_mbps": 0.0,
+    "video_loss_percent_ma": 0.0,
+    "raw_loss_percent": 0.0,
+    "delay_ms": 5.0
+  }
+]

@@ -1,247 +1,232 @@
 # qos_ryu_app.py
-# Ryu 控制器本身是一个 OpenFlow 控制器，负责交换机流表和 Meter，但它本身没有 REST API 功能。
-#   Ryu 控制器应用（REST + YANG 验证 + Meter/Flow 下发）
-
-# Ryu app that:
-# - 公开 REST 端点 /qos-policies（PUT/PATCH）
-# - 从 yang_parser.get_required_policy_keys() 加载 YANG 必需的键
-# - 根据 YANG 字段验证传入的策略列表
-# - 对连接的 OpenFlow 1.3 交换机进行流量和流量配置
-
-# Requirements:
-#  - ryu (pip install ryu)
-#  - pyang (for yang_parser to work)
-#
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
+from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, set_ev_cls
 from ryu.lib import hub
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet, ipv4, tcp
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
-from ryu.controller.handler import HANDSHAKE_DISPATCHER
-from ryu import cfg
-
 from webob import Response
+import json
+import time
 
-import json, os
-from urllib.parse import urlparse
-
-# import your yang_parser to preserve local YANG loading mechanism
+# YANG 모델 파서 임포트
 from yang_parser import get_required_policy_keys
 
-# REST path
-REST_URL = '/qos-policies'  # We'll accept PUT/PATCH json here
+# --- 설정 ---
+# [수정됨] Decision Engine(Client)의 요청 URL (http://.../qos/qos-policies)과 일치시킴
+REST_URL = '/qos/qos-policies'
+STATS_URL = '/stats'
 
-# 将策略“名称”映射到演示 TCP 目标端口（用于 Mininet 演示中的流量分类）。
+# 포트 매핑 (Mininet: vSrv->5001, dSrv->5002)
 POLICY_PORT_MAP = {
     "video": 5001,
-    "download": 5002,
-    "background": 5003
+    "download": 5002
 }
 
-# 辅助函数，将 Mbps 转换为 kbps，OpenFlow meter 用 kbps
 def mbps_to_kbps(mbps):
     return int(mbps * 1000)
 
-# 在 OpenFlow 中，Meter（流量计） 是一种用于速率限制和流量控制的机制，可以对匹配到的流量进行“打分和处理”。
-# 它的核心功能：
-#     限制速率：例如限制某条流每秒不超过 10 Mbps
-#     动作处理：当流量超过设定速率，可以选择丢包（Drop）或者打标记（DSCP/EXP）
-#     多策略支持：一个 Meter 可以应用到一个或多个流上
-#
-# 换句话说，Meter 就像水管上的阀门，你可以控制流经的水（数据流）速率，超出的部分可以丢掉或标记。
-
-
-# QoSController： 核心 Ryu 应用，管理交换机连接、Meter 和 Flow 下发
 class QoSController(app_manager.RyuApp):
-    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION] # 声明支持的 OpenFlow 版本 1.3
-    _CONTEXTS = { 'wsgi': WSGIApplication } # 告诉 Ryu 注入 wsgi 对象，用于 REST API
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    _CONTEXTS = { 'wsgi': WSGIApplication }
 
     def __init__(self, *args, **kwargs):
         super(QoSController, self).__init__(*args, **kwargs)
-        self.datapaths = {}  # dpid -> datapath 保存已连接交换机的 dpid -> datapath 映射
-        self.REQUIRED_POLICY_KEYS = get_required_policy_keys() # 从本地 YANG 模型获取策略所需字段
-        self.logger.info("Loaded REQUIRED_POLICY_KEYS from YANG: %s", self.REQUIRED_POLICY_KEYS)
-        # register REST controller
-        wsgi = kwargs['wsgi'] # 获取 WSGI 实例
-        wsgi.register(RestQoSController, { 'qos_app': self }) # 注册 REST 控制器，把当前 Ryu App 实例传给 REST 控制器
+        self.datapaths = {}
+        
+        # YANG 파서를 통해 필수 키 목록 로드 (name, priority, bandwidth-limit)
+        self.REQUIRED_POLICY_KEYS = get_required_policy_keys()
+        self.logger.info(f"[YANG] Required Keys Loaded: {self.REQUIRED_POLICY_KEYS}")
+        
+        # REST API 등록
+        wsgi = kwargs['wsgi']
+        wsgi.register(RestQoSController, { 'qos_app': self })
 
-    def install_base_flows(self, dp): # 基础流表函数
-        ofp = dp.ofproto
+        # 모니터링 스레드
+        self.monitor_thread = hub.spawn(self._monitor)
+        
+        # 통계 데이터 저장소
+        self.prev_stats = {}
+        
+        # 가공된 네트워크 상태
+        self.net_status = {
+            "video_bps": 0, "download_bps": 0,
+            "video_tx_bps": 0, "download_tx_bps": 0,
+            "video_loss": 0, "total_bps": 0
+        }
+
+    # --- [NEW] Flow 추가 헬퍼 함수 ---
+    def add_flow(self, datapath, priority, match, actions, meter_id=None):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        # Actions Instruction 생성
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        # Meter가 있다면 Instruction에 추가 (QoS 적용 시 사용)
+        if meter_id:
+            inst.insert(0, parser.OFPInstructionMeter(meter_id))
+            
+        mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
+                                match=match, instructions=inst)
+        datapath.send_msg(mod)
+
+    # --- 기본 Flow 및 모니터링 Flow 설치 ---
+    def install_base_flows(self, dp):
         parser = dp.ofproto_parser
+        ofproto = dp.ofproto
 
-        # 1. allow ARP
-        match_arp = parser.OFPMatch(eth_type=0x0806)
-        actions = [parser.OFPActionOutput(ofp.OFPP_NORMAL)]
-        inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-        mod = parser.OFPFlowMod(datapath=dp, priority=10, match=match_arp, instructions=inst)
-        dp.send_msg(mod)
+        # 공통 Action: Normal Forwarding
+        actions_normal = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
 
-        # 2. allow ICMP (for ping)
-        match_icmp = parser.OFPMatch(eth_type=0x0800, ip_proto=1)
-        mod = parser.OFPFlowMod(datapath=dp, priority=10, match=match_icmp, instructions=inst)
-        dp.send_msg(mod)
+        # 1. ARP, ICMP, 기본 통신 허용 (Priority 10)
+        self.add_flow(dp, 10, parser.OFPMatch(eth_type=0x0806), actions_normal)
+        self.add_flow(dp, 10, parser.OFPMatch(eth_type=0x0800, ip_proto=1), actions_normal)
+        
+        # 2. 모니터링용 Flow 설치 (Priority 5)
+        # 통계 수집을 위해 트래픽을 구분하지만, 동작은 Normal Forwarding
+        match_video = parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_dst=5001)
+        self.add_flow(dp, 5, match_video, actions_normal)
 
-        # 3. default NORMAL forwarding (fallback)
-        match_all = parser.OFPMatch()
-        mod = parser.OFPFlowMod(datapath=dp,
-                                priority=0,
-                                match=match_all,
-                                instructions=inst)
-        dp.send_msg(mod)
+        match_download = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5002)
+        self.add_flow(dp, 5, match_download, actions_normal)
 
-        self.logger.info("Installed base flows (ARP/ICMP/NORMAL) on dp %s", dp.id)
+        # 3. Default: Normal Forwarding (Priority 0)
+        self.add_flow(dp, 0, parser.OFPMatch(), actions_normal)
 
-    # 交换机连接状态处理
-    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, CONFIG_DISPATCHER, HANDSHAKE_DISPATCHER])
+        self.logger.info(f"Initialized Switch: {dp.id} (Monitoring Flows Installed)")
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
         dp = ev.datapath
         if ev.state == MAIN_DISPATCHER:
             self.datapaths[dp.id] = dp
-            self.install_base_flows(dp) # 让交换机连接后自动安装基础流表
-            self.logger.info("Datapath connected: %s", dp.id)
-        elif ev.state == ofp_event.EventOFPStateChange.__dict__.get('DISCONNECTED', None):
-            # best-effort removal
-            if dp.id in self.datapaths: # datapaths 更新，断开时删除
+            self.install_base_flows(dp)
+        elif ev.state == DEAD_DISPATCHER:
+            if dp.id in self.datapaths:
                 del self.datapaths[dp.id]
-                self.logger.info("Datapath disconnected: %s", dp.id)
 
-    # 策略应用函数 ： 按策略下发 Meter + 流表
+    # --- 모니터링 (변경 없음) ---
+    def _monitor(self):
+        while True:
+            for dp in self.datapaths.values():
+                self._request_stats(dp)
+            hub.sleep(1)
+
+    def _request_stats(self, datapath):
+        parser = datapath.ofproto_parser
+        req = parser.OFPFlowStatsRequest(datapath)
+        datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        dpid = ev.msg.datapath.id
+        body = ev.msg.body
+        
+        vid_pkts = 0; vid_bytes = 0
+        dl_pkts = 0; dl_bytes = 0
+
+        # 모든 Flow Entry 통계 합산 (Priority 5 + Priority 100 QoS Flow)
+        for stat in body:
+            # Video (UDP 5001)
+            if (stat.match.get('ip_proto') == 17 and stat.match.get('udp_dst') == 5001):
+                vid_pkts += stat.packet_count
+                vid_bytes += stat.byte_count
+            
+            # Download (TCP 5002)
+            elif (stat.match.get('ip_proto') == 6 and stat.match.get('tcp_dst') == 5002):
+                dl_pkts += stat.packet_count
+                dl_bytes += stat.byte_count
+
+        current_time = time.time()
+        
+        if dpid not in self.prev_stats:
+            self.prev_stats[dpid] = {'vid_bytes': 0, 'dl_bytes': 0, 'time': current_time, 'vid_speed': 0, 'dl_speed': 0}
+
+        prev = self.prev_stats[dpid]
+        time_diff = max(0.001, current_time - prev['time'])
+        
+        vid_diff = max(0, vid_bytes - prev['vid_bytes'])
+        dl_diff = max(0, dl_bytes - prev['dl_bytes'])
+
+        self.prev_stats[dpid] = {
+            'vid_bytes': vid_bytes, 'dl_bytes': dl_bytes, 'time': current_time,
+            'vid_speed': vid_diff * 8 / time_diff, 
+            'dl_speed': dl_diff * 8 / time_diff
+        }
+
+        s1 = self.prev_stats.get(1)
+        s2 = self.prev_stats.get(2)
+
+        if s1 and s2:
+            self.net_status['video_bps'] = s1['vid_speed']
+            self.net_status['download_bps'] = s1['dl_speed']
+            self.net_status['total_bps'] = s1['vid_speed'] + s1['dl_speed']
+            self.net_status['video_tx_bps'] = s2['vid_speed']
+            self.net_status['download_tx_bps'] = s2['dl_speed']
+            self.net_status['video_loss'] = max(0, s2['vid_speed'] - s1['vid_speed'])
+            self.net_status['download_loss'] = max(0, s2['dl_speed'] - s1['dl_speed'])
+
+    # --- QoS 정책 적용 (Meter 사용) ---
     def apply_policies(self, policies_list):
-        if not isinstance(policies_list, list): # 检查传入策略是否为列表
-            raise ValueError("policies_list must be a list")
+        # YANG 검증
+        for policy in policies_list:
+            if not self.REQUIRED_POLICY_KEYS.issubset(policy.keys()):
+                missing = self.REQUIRED_POLICY_KEYS - set(policy.keys())
+                self.logger.error(f"[YANG VALIDATION FAIL] Policy missing keys: {missing}. Policy: {policy}")
+                continue
 
-        # 将列表转换成字典 name -> policy，方便查找
         policies = { p['name']: p for p in policies_list }
+        print(f"[RYU] Applying Policies: {policies}")
 
-        # 遍历已连接交换机, install meters and flows
         for dp in self.datapaths.values():
             ofp = dp.ofproto
             parser = dp.ofproto_parser
+            actions_normal = [parser.OFPActionOutput(ofp.OFPP_NORMAL)]
 
-            # 首先：为了方便起见，移除之前创建的现有meters（可选）
-            # 注意：某些交换机不允许删除已预留的meters ID；我们尽量减少此操作。
-            # 我们将尝试通过 meter_id = priority（或其派生 ID）来添加/更新meters。
             for name, pol in policies.items():
-                # choose meter_id (must be 1..(2^32-1)); avoid 0
-                meter_id = max(1, int(pol.get('priority', 1))) # 为每个策略选择 meter_id
-                bw_mbps = int(pol.get('bandwidth-limit', 1))
-                kbps = mbps_to_kbps(bw_mbps)# 获取带宽限制并转换为 kbps
-
-                # create meter band drop。构建 MeterBandDrop（超出限速就丢包）
+                # 1. Meter 설정 (속도 제한)
+                meter_id = max(1, int(pol.get('priority', 1))) # Priority를 ID로 활용
+                bw_mbps = int(pol.get('bandwidth-limit', 10))
+                kbps = mbps_to_kbps(bw_mbps)
+                
                 bands = [parser.OFPMeterBandDrop(rate=kbps, burst_size=max(1000, int(kbps/10)))]
-                flags = ofp.OFPMF_KBPS  # 速率单位 kbps
-
-                # Build meter mod (ADD or MODIFY) - we'll first try ADD; if exists, we modify.
-                # To simplify, we send a MODIFY (controller should handle appropriately).
-                # 发送 OFPMC_ADD 消息添加 meter
-                # 如果失败，会尝试 OFPMC_MODIFY 修改已存在的 meter
+                req = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_ADD, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
                 try:
-                    req = parser.OFPMeterMod(datapath=dp,
-                                             command=ofp.OFPMC_ADD,
-                                             flags=flags,
-                                             meter_id=meter_id,
-                                             bands=bands)
                     dp.send_msg(req)
-                    self.logger.info("Sent OFPMC_ADD meter %d on dp %s (rate=%dkbps) for policy %s", meter_id, dp.id, kbps, name)
-                except Exception as e:
-                    # fallback to modify
-                    try:
-                        req = parser.OFPMeterMod(datapath=dp,
-                                                 command=ofp.OFPMC_MODIFY,
-                                                 flags=flags,
-                                                 meter_id=meter_id,
-                                                 bands=bands)
-                        dp.send_msg(req)
-                        self.logger.info("Modified meter %d on dp %s (rate=%dkbps) for policy %s", meter_id, dp.id, kbps, name)
-                    except Exception as e2:
-                        self.logger.error("Failed to add/modify meter %d on dp %s: %s", meter_id, dp.id, e2)
+                except:
+                    req = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_MODIFY, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
+                    dp.send_msg(req)
 
-                # install a flow that matches TCP dst port mapped for this policy
-                # 为策略对应的 TCP 端口安装流表
-                tcp_port = POLICY_PORT_MAP.get(name)
-                if tcp_port is None:
-                    self.logger.warning("No port mapping for policy '%s' -> skipping flow install", name)
+                # 2. Flow 설정 (해당 Meter를 통과하도록 설정)
+                # 요청하신대로 Download TCP만 별도로 강력하게 제어 가능
+                if name == "video":
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_dst=5001)
+                elif name == "download":
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5002)
+                else:
                     continue
 
-                match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=tcp_port)
-                # instructions: apply meter, then normal output
-                inst = [
-                    parser.OFPInstructionMeter(meter_id),
-                    parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS,
-                                                 [parser.OFPActionOutput(ofp.OFPP_NORMAL)])
-                ]
-                # 优先级：policy 优先级越高，优先级越高。
-                priority = 100 + int(pol.get('priority', 1)) # 流表优先级 = 100 + 策略 priority
-                mod = parser.OFPFlowMod(datapath=dp,
-                                        priority=priority,
-                                        match=match,
-                                        instructions=inst,
-                                        table_id=0)
-                try:
-                    dp.send_msg(mod)
-                    self.logger.info("Installed flow on dp %s: match tcp_dst=%d -> meter %d (priority=%d)",
-                                     dp.id, tcp_port, meter_id, priority)
-                except Exception as e:
-                    self.logger.error("Failed to install flow on dp %s: %s", dp.id, e)
+                # Priority를 높여서(100+) 기존 Monitoring Flow(5)보다 먼저 적용되게 함
+                # add_flow 함수를 사용하여 깔끔하게 적용
+                prio = 100 + int(pol.get('priority', 1))
+                self.add_flow(dp, prio, match, actions_normal, meter_id=meter_id)
 
-        return True
-
-
-# REST 控制器， REST API 接口，PUT/PATCH 更新策略
 class RestQoSController(ControllerBase):
     def __init__(self, req, link, data, **config):
         super(RestQoSController, self).__init__(req, link, data, **config)
         self.qos_app = data['qos_app']
 
-    # PUT 方法，接收 JSON payload
-    @route('qos', REST_URL, methods=['PUT'])
+    @route('qos', REST_URL, methods=['PUT', 'POST'])
     def put_policies(self, req, **kwargs):
         try:
-            payload = req.body.decode('utf-8')
-            data = json.loads(payload)
+            data = json.loads(req.body.decode('utf-8'))
+            policies = data.get('qos-policies:qos-policies', {}).get('policy', [])
+            self.qos_app.apply_policies(policies)
+            return Response(status=200, body=json.dumps({"msg": "OK"}), content_type='application/json', charset='utf-8')
         except Exception as e:
-            return Response(
-                status=400,
-                content_type='application/json',
-                body=json.dumps({"error": "invalid json", "detail": str(e)})
-            )
-        # 获取策略列表
-        if 'qos-policies:qos-policies' in data:
-            policies_list = data['qos-policies:qos-policies'].get('policy', [])
-        else:
-            return Response(
-                status=400,
-                content_type='application/json',
-                body=json.dumps({"error": "Invalid payload structure"})
-            )
-        # 校验策略是否缺少 YANG 定义的字段
-        missing_keys = self.qos_app.REQUIRED_POLICY_KEYS - set(policies_list[0].keys())
-        if missing_keys:
-            return Response(
-                status=400,
-                content_type='application/json',
-                body=json.dumps({"error": "Missing required fields",
-                                 "missing": list(missing_keys)})
-            )
+            return Response(status=500, body=str(e), charset='utf-8')
 
-        try:
-            # 调用 Ryu App 的 apply_policies，真正下发流表和 meter
-            self.qos_app.apply_policies(policies_list)
-        except Exception as e:
-            return Response(
-                status=500,
-                content_type='application/json',
-                body=json.dumps({"error": "Failed to apply policies", "detail": str(e)})
-            )
-
-        return Response(status=204)
-
-
-
-
-    # PATCH 方法直接复用 PUT，实现同样功能
-    @route('qos', REST_URL, methods=['PATCH'])
-    def patch_policies(self, req, **kwargs):
-        return self.put_policies(req, **kwargs)
+    @route('qos_stats', STATS_URL, methods=['GET'])
+    def get_stats(self, req, **kwargs):
+        return Response(content_type='application/json', body=json.dumps(self.qos_app.net_status), charset='utf-8')
