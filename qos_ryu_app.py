@@ -1,17 +1,6 @@
-# qos_ryu_app.py
-# Ryu 控制器本身是一个 OpenFlow 控制器，负责交换机流表和 Meter，但它本身没有 REST API 功能。
-#   Ryu 控制器应用（REST + YANG 验证 + Meter/Flow 下发）
+# REST API 로 QoS 정책을 받고, YANG 모델로 필드를 검증한 뒤 OpenFlow 1.3 스위치에
+# Meter/Flow 를 설치하는 Ryu 애플리케이션.
 
-# Ryu app that:
-# - 公开 REST 端点 /qos-policies（PUT/PATCH）
-# - 从 yang_parser.get_required_policy_keys() 加载 YANG 必需的键
-# - 根据 YANG 字段验证传入的策略列表
-# - 对连接的 OpenFlow 1.3 交换机进行流量和流量配置
-
-# Requirements:
-#  - ryu (pip install ryu)
-#  - pyang (for yang_parser to work)
-#
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
@@ -27,63 +16,56 @@ from webob import Response
 import json, os
 from urllib.parse import urlparse
 
-# import your yang_parser to preserve local YANG loading mechanism
+# YANG 모델을 로드하기 위한 로컬 파서
 from yang_parser import get_required_policy_keys
 
-# REST path
-REST_URL = '/qos-policies'  # We'll accept PUT/PATCH json here
+# QoS 정책을 수신하는 REST 경로
+REST_URL = '/qos-policies'
 
-# 将策略“名称”映射到演示 TCP 目标端口（用于 Mininet 演示中的流量分类）。
+# 정책 이름을 미니넷 데모에서 사용할 TCP 목적지 포트로 매핑한다.
 POLICY_PORT_MAP = {
     "video": 5001,
     "download": 5002,
     "background": 5003
 }
 
-# 辅助函数，将 Mbps 转换为 kbps，OpenFlow meter 用 kbps
+# Mbps 단위 입력을 OpenFlow meter 가 사용하는 kbps 단위로 변환한다.
 def mbps_to_kbps(mbps):
     return int(mbps * 1000)
 
-# 在 OpenFlow 中，Meter（流量计） 是一种用于速率限制和流量控制的机制，可以对匹配到的流量进行“打分和处理”。
-# 它的核心功能：
-#     限制速率：例如限制某条流每秒不超过 10 Mbps
-#     动作处理：当流量超过设定速率，可以选择丢包（Drop）或者打标记（DSCP/EXP）
-#     多策略支持：一个 Meter 可以应用到一个或多个流上
-#
-# 换句话说，Meter 就像水管上的阀门，你可以控制流经的水（数据流）速率，超出的部分可以丢掉或标记。
-
-
-# QoSController： 核心 Ryu 应用，管理交换机连接、Meter 和 Flow 下发
+# QoSController: 스위치 연결 상태를 관리하고 REST 요청을 받아 Meter/Flow 를 구성한다.
 class QoSController(app_manager.RyuApp):
-    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION] # 声明支持的 OpenFlow 版本 1.3
-    _CONTEXTS = { 'wsgi': WSGIApplication } # 告诉 Ryu 注入 wsgi 对象，用于 REST API
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    _CONTEXTS = { 'wsgi': WSGIApplication }
 
     def __init__(self, *args, **kwargs):
         super(QoSController, self).__init__(*args, **kwargs)
-        self.datapaths = {}  # dpid -> datapath 保存已连接交换机的 dpid -> datapath 映射
-        self.REQUIRED_POLICY_KEYS = get_required_policy_keys() # 从本地 YANG 模型获取策略所需字段
+        self.datapaths = {}  # 연결된 스위치의 dpid -> datapath 매핑
+        self.REQUIRED_POLICY_KEYS = get_required_policy_keys()  # YANG 모델에서 필수 필드를 불러온다.
+        # YANG에서 정의한 필수 필드를 미리 로드하여 REST 요청 검증에 재사용한다.
         self.logger.info("Loaded REQUIRED_POLICY_KEYS from YANG: %s", self.REQUIRED_POLICY_KEYS)
-        # register REST controller
-        wsgi = kwargs['wsgi'] # 获取 WSGI 实例
-        wsgi.register(RestQoSController, { 'qos_app': self }) # 注册 REST 控制器，把当前 Ryu App 实例传给 REST 控制器
+        # REST 컨트롤러 등록
+        wsgi = kwargs['wsgi']
+        wsgi.register(RestQoSController, { 'qos_app': self })
 
-    def install_base_flows(self, dp): # 基础流表函数
+    def install_base_flows(self, dp):
+        # 스위치가 처음 연결될 때 ARP/ICMP 허용 및 NORMAL 포워딩을 설정하는 기본 플로우를 설치한다.
         ofp = dp.ofproto
         parser = dp.ofproto_parser
 
-        # 1. allow ARP
+        # 1. ARP 허용
         match_arp = parser.OFPMatch(eth_type=0x0806)
         actions = [parser.OFPActionOutput(ofp.OFPP_NORMAL)]
         inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(datapath=dp, priority=10, match=match_arp, instructions=inst)
         dp.send_msg(mod)
 
-        # 2. allow ICMP (for ping)
+        # 2. ICMP 허용 (ping 테스트용)
         match_icmp = parser.OFPMatch(eth_type=0x0800, ip_proto=1)
         mod = parser.OFPFlowMod(datapath=dp, priority=10, match=match_icmp, instructions=inst)
         dp.send_msg(mod)
 
-        # 3. default NORMAL forwarding (fallback)
+        # 3. 기본 NORMAL 포워딩 (폴백 경로)
         match_all = parser.OFPMatch()
         mod = parser.OFPFlowMod(datapath=dp,
                                 priority=0,
@@ -93,50 +75,42 @@ class QoSController(app_manager.RyuApp):
 
         self.logger.info("Installed base flows (ARP/ICMP/NORMAL) on dp %s", dp.id)
 
-    # 交换机连接状态处理
+    # 스위치 연결 상태 처리
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, CONFIG_DISPATCHER, HANDSHAKE_DISPATCHER])
     def _state_change_handler(self, ev):
         dp = ev.datapath
         if ev.state == MAIN_DISPATCHER:
             self.datapaths[dp.id] = dp
-            self.install_base_flows(dp) # 让交换机连接后自动安装基础流表
+            self.install_base_flows(dp)
+            # 스위치가 등록되면 바로 기본 플로우를 내려서 네트워크가 즉시 동작하도록 한다.
             self.logger.info("Datapath connected: %s", dp.id)
         elif ev.state == ofp_event.EventOFPStateChange.__dict__.get('DISCONNECTED', None):
-            # best-effort removal
-            if dp.id in self.datapaths: # datapaths 更新，断开时删除
+            if dp.id in self.datapaths:
                 del self.datapaths[dp.id]
                 self.logger.info("Datapath disconnected: %s", dp.id)
 
-    # 策略应用函数 ： 按策略下发 Meter + 流表
+    # REST 로 받은 정책 목록을 해석해 각 스위치에 Meter 와 Flow 를 설정한다.
     def apply_policies(self, policies_list):
-        if not isinstance(policies_list, list): # 检查传入策略是否为列表
+        if not isinstance(policies_list, list):
             raise ValueError("policies_list must be a list")
 
-        # 将列表转换成字典 name -> policy，方便查找
+        # 리스트를 이름 기준 딕셔너리로 변환해 조회를 단순화
         policies = { p['name']: p for p in policies_list }
 
-        # 遍历已连接交换机, install meters and flows
+        # 연결된 스위치를 순회하며 meter 와 flow 를 설정
         for dp in self.datapaths.values():
             ofp = dp.ofproto
             parser = dp.ofproto_parser
 
-            # 首先：为了方便起见，移除之前创建的现有meters（可选）
-            # 注意：某些交换机不允许删除已预留的meters ID；我们尽量减少此操作。
-            # 我们将尝试通过 meter_id = priority（或其派生 ID）来添加/更新meters。
+            # 정책의 priority 값을 기반으로 meter_id 를 정해 추가하거나 수정한다.
             for name, pol in policies.items():
-                # choose meter_id (must be 1..(2^32-1)); avoid 0
-                meter_id = max(1, int(pol.get('priority', 1))) # 为每个策略选择 meter_id
+                meter_id = max(1, int(pol.get('priority', 1)))
                 bw_mbps = int(pol.get('bandwidth-limit', 1))
-                kbps = mbps_to_kbps(bw_mbps)# 获取带宽限制并转换为 kbps
+                kbps = mbps_to_kbps(bw_mbps)
 
-                # create meter band drop。构建 MeterBandDrop（超出限速就丢包）
                 bands = [parser.OFPMeterBandDrop(rate=kbps, burst_size=max(1000, int(kbps/10)))]
-                flags = ofp.OFPMF_KBPS  # 速率单位 kbps
+                flags = ofp.OFPMF_KBPS
 
-                # Build meter mod (ADD or MODIFY) - we'll first try ADD; if exists, we modify.
-                # To simplify, we send a MODIFY (controller should handle appropriately).
-                # 发送 OFPMC_ADD 消息添加 meter
-                # 如果失败，会尝试 OFPMC_MODIFY 修改已存在的 meter
                 try:
                     req = parser.OFPMeterMod(datapath=dp,
                                              command=ofp.OFPMC_ADD,
@@ -146,7 +120,6 @@ class QoSController(app_manager.RyuApp):
                     dp.send_msg(req)
                     self.logger.info("Sent OFPMC_ADD meter %d on dp %s (rate=%dkbps) for policy %s", meter_id, dp.id, kbps, name)
                 except Exception as e:
-                    # fallback to modify
                     try:
                         req = parser.OFPMeterMod(datapath=dp,
                                                  command=ofp.OFPMC_MODIFY,
@@ -158,22 +131,21 @@ class QoSController(app_manager.RyuApp):
                     except Exception as e2:
                         self.logger.error("Failed to add/modify meter %d on dp %s: %s", meter_id, dp.id, e2)
 
-                # install a flow that matches TCP dst port mapped for this policy
-                # 为策略对应的 TCP 端口安装流表
+                # 정책 이름에 대응하는 TCP 목적지 포트로 매칭 조건을 만든다.
                 tcp_port = POLICY_PORT_MAP.get(name)
                 if tcp_port is None:
                     self.logger.warning("No port mapping for policy '%s' -> skipping flow install", name)
                     continue
 
                 match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=tcp_port)
-                # instructions: apply meter, then normal output
+                # 동작: 지정한 meter 를 적용한 뒤 NORMAL 포워딩을 수행한다.
                 inst = [
                     parser.OFPInstructionMeter(meter_id),
                     parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS,
                                                  [parser.OFPActionOutput(ofp.OFPP_NORMAL)])
                 ]
-                # 优先级：policy 优先级越高，优先级越高。
-                priority = 100 + int(pol.get('priority', 1)) # 流表优先级 = 100 + 策略 priority
+                # 우선순위는 정책 priority 값에 100을 더해 구분한다.
+                priority = 100 + int(pol.get('priority', 1))
                 mod = parser.OFPFlowMod(datapath=dp,
                                         priority=priority,
                                         match=match,
@@ -189,13 +161,13 @@ class QoSController(app_manager.RyuApp):
         return True
 
 
-# REST 控制器， REST API 接口，PUT/PATCH 更新策略
+# REST API 를 통해 QoS 정책을 갱신하는 컨트롤러
 class RestQoSController(ControllerBase):
     def __init__(self, req, link, data, **config):
         super(RestQoSController, self).__init__(req, link, data, **config)
         self.qos_app = data['qos_app']
 
-    # PUT 方法，接收 JSON payload
+    # PUT 메서드: 정책 리스트를 JSON 으로 수신
     @route('qos', REST_URL, methods=['PUT'])
     def put_policies(self, req, **kwargs):
         try:
@@ -207,7 +179,7 @@ class RestQoSController(ControllerBase):
                 content_type='application/json',
                 body=json.dumps({"error": "invalid json", "detail": str(e)})
             )
-        # 获取策略列表
+        # 정책 목록 추출
         if 'qos-policies:qos-policies' in data:
             policies_list = data['qos-policies:qos-policies'].get('policy', [])
         else:
@@ -216,7 +188,7 @@ class RestQoSController(ControllerBase):
                 content_type='application/json',
                 body=json.dumps({"error": "Invalid payload structure"})
             )
-        # 校验策略是否缺少 YANG 定义的字段
+        # YANG 에 정의된 필수 필드가 누락되었는지 확인
         missing_keys = self.qos_app.REQUIRED_POLICY_KEYS - set(policies_list[0].keys())
         if missing_keys:
             return Response(
@@ -227,7 +199,6 @@ class RestQoSController(ControllerBase):
             )
 
         try:
-            # 调用 Ryu App 的 apply_policies，真正下发流表和 meter
             self.qos_app.apply_policies(policies_list)
         except Exception as e:
             return Response(
@@ -241,7 +212,7 @@ class RestQoSController(ControllerBase):
 
 
 
-    # PATCH 方法直接复用 PUT，实现同样功能
+    # PATCH 메서드는 PUT 과 동일하게 동작
     @route('qos', REST_URL, methods=['PATCH'])
     def patch_policies(self, req, **kwargs):
         return self.put_policies(req, **kwargs)
