@@ -54,37 +54,44 @@ def video_download_topology():
     s2 = net.addSwitch('s2')  # 서버 쪽 스위치
 
     info('*** Creating links\n')
-    # 사용자 ↔ s1: 100Mbps (충분히 넓은 링크)
+    # 사용자 ↔ s1: > 100Mbps (충분히 넓은 링크)
     net.addLink(h1, s1)
     net.addLink(h2, s1)
 
     # s1 ↔ s2: 10Mbps 병목 링크 (여기가 혼잡 구간)
     net.addLink(s1, s2, bw=10)
 
-    # 서버 ↔ s2: 100Mbps (서버 쪽은 넉넉한 대역폭)
+    # 서버 ↔ s2: > 100Mbps (서버 쪽은 넉넉한 대역폭)
     net.addLink(vSrv, s2)
     net.addLink(dSrv, s2)
 
     info('*** Starting network\n')
     net.start()
 
-    # --- iperf 서버 자동 실행 ---
-    info('*** Starting iperf servers on vSrv (video) and dSrv (download)\n')
-    # 비디오 서버: UDP 모드, 포트 5001
-    vSrv.cmd('nohup iperf -s -u -p 5001 > /tmp/iperf_vsrv.log 2>&1 &')
-    # 다운로드 서버: TCP 모드, 포트 5002
-    dSrv.cmd('nohup iperf -s -p 5002 > /tmp/iperf_dsrv.log 2>&1 &')
+    # --- iperf 서버(수신자) 자동 실행 ---
+    # h1, h2가 데이터를 받을 준비를 합니다.
+    info('*** Starting iperf servers (Receivers) on h1 (video user) and h2 (download user)\n')
+    
+    # h1 (Video User): UDP 수신 대기 (Port 5001)
+    # -s: Server mode (수신)
+    # -u: UDP
+    # -p 5001: Port 5001
+    h1.cmd('nohup iperf -s -u -p 5001 > /tmp/iperf_h1.log 2>&1 &')
+    
+    # h2 (Download User): TCP 수신 대기 (Port 5002)
+    # -s: Server mode (수신)
+    # -p 5002: Port 5002
+    h2.cmd('nohup iperf -s -p 5002 > /tmp/iperf_h2.log 2>&1 &')
 
-    info('*** iperf servers started:\n')
-    info('    - vSrv (video):   UDP server on port 5001\n')
-    info('    - dSrv (download): TCP server on port 5002\n')
+    info('*** iperf receivers started:\n')
+    info('    - h1 (Video User):   Listening UDP on port 5001\n')
+    info('    - h2 (Download User): Listening TCP on port 5002\n')
 
-    info('*** Network is ready. Use the CLI to generate traffic.\n')
+    info('*** Network is ready. Use "xterm vSrv dSrv" to generate traffic.\n')
     CLI(net)   # Mininet CLI 진입
 
     info('*** Stopping network\n')
     net.stop()
-
 
 if __name__ == '__main__':
     setLogLevel('info')

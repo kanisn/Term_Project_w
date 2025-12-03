@@ -1,92 +1,82 @@
-# decision_engine_push_to_ryu.py
 import requests
-import json, time, os
-from flask import Flask, request, jsonify  # Flask가 필요하다 (pip install Flask)
+import json
+from flask import Flask, request, jsonify
 
-# 네트워크 지표를 바탕으로 QoS 정책을 계산하여 Ryu REST API(기본 8080)로 전달한다.
-RYU_REST_URL = "http://127.0.0.1:8080/qos-policies"
-HEADERS = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-
-def decide_policy(metrics):
-    load = metrics["traffic_load"]
-    delay = metrics["delay_ms"]
-    loss = metrics["packet_loss"]
-
-    print("---------------------------------------------------\n"
-        f"traffic_load: {load * 100:.0f}%, "
-        f"delay: {delay}ms, "
-        f"packet_loss: {loss * 100:.1f}%"
-    )
-    # 기본 정책을 정의하고 이후 상황에 맞춰 priority/bandwidth 를 조정한다.
-    policies = {
-        "video": {"name": "video", "priority": 7, "bandwidth-limit": 600},
-        "download": {"name": "download", "priority": 5, "bandwidth-limit": 500},
-        "background": {"name": "background", "priority": 1, "bandwidth-limit": 200},
-    }
-
-    if load > 1.1 or delay > 150 or loss > 0.02:
-        # 심각한 혼잡: 비디오와 다운로드를 최대한 보호하고 배경 트래픽을 강하게 제한한다.
-        policies["video"]["priority"] = 200
-        policies["video"]["bandwidth-limit"] = 800
-        policies["download"]["bandwidth-limit"] = 500
-        policies["background"]["bandwidth-limit"] = 50
-        print("[DECISION] Severe Congestion: Increase video bandwidth, protect download, strictly limit others.")
-    elif load > 0.85 or delay > 80 or loss > 0.005:
-        # 높은 부하에서는 비디오를 보호하고, 나머지 트래픽은 엄격히 제한한다.
-        policies["video"]["priority"] = 10
-        policies["video"]["bandwidth-limit"] = 900
-        policies["download"]["bandwidth-limit"] = 30
-        policies["background"]["bandwidth-limit"] = 10
-        print("[DECISION] High Load: Prioritize video, strictly limit other traffic.")
-    else:
-        # 평상시에는 자원을 적극 활용하기 위해 더 완화된 값을 사용한다.
-        policies["video"]["priority"] = 7
-        policies["video"]["bandwidth-limit"] = 800
-        policies["download"]["bandwidth-limit"] = 600
-        policies["background"]["bandwidth-limit"] = 300
-        print("[DECISION] Normal Load: Relaxed policies for high utilization.")
-
-    return list(policies.values())
-
-def build_config_json(policies_list):
-    # YANG 모델을 따라 "qos-policies" 컨테이너 구조로 JSON 을 감싼다.
-    data = {
-        "qos-policies:qos-policies": {
-            "policy": policies_list
-        }
-    }
-    return json.dumps(data)
-
-def push_to_ryu(policies_list):
-    json_config = build_config_json(policies_list)
-    try:
-        r = requests.put(RYU_REST_URL, data=json_config, headers=HEADERS, timeout=3)
-        if r.status_code in (200, 204):
-            print(f"[RYU REST] Successfully sent {len(policies_list)} policies (status {r.status_code}).")
-        else:
-            print(f"[RYU REST][ERROR] Status: {r.status_code}, Response: {r.text}")
-    except Exception as e:
-        print("[RYU REST][ERROR] Failed to connect to Ryu:", e)
-
+# Ryu Controller URL
+RYU_REST_URL = "http://127.0.0.1:8080/qos/qos-policies"
+HEADERS = {'Content-Type': 'application/json'}
 
 app = Flask(__name__)
 
+def decide_policy(metrics):
+    load = metrics.get("traffic_load", 0)
+    delay = metrics.get("delay_ms", 0)
+    loss = metrics.get("packet_loss", 0)
+    video_bw = metrics.get("video_mbps", 0)
+
+    print(f"[ENGINE] Analyzing: Load={load}Mbps, Delay={delay}ms, Loss={loss:.1%}")
+
+    # 기본 정책 (평상시)
+    # 10Mbps 링크를 공유하므로 합이 10을 넘으면 안됨
+    policies = {
+        "video": {"name": "video", "priority": 10, "bandwidth-limit": 8},
+        "download": {"name": "download", "priority": 5, "bandwidth-limit": 8},
+        "background": {"name": "background", "priority": 1, "bandwidth-limit": 2}
+    }
+
+    # --- 상황별 정책 조정 ---
+    
+    # 1. 심각한 혼잡 (손실 발생 OR 지연 150ms 이상 OR 로드 9.5M 이상)
+    if loss > 0.01 or delay > 150 or load > 9.5:
+        print(">>> CRITICAL CONGESTION! Throttling Download.")
+        
+        # 비디오 최우선 보호
+        policies["video"]["priority"] = 50
+        policies["video"]["bandwidth-limit"] = 9 # 링크 거의 전체 할당
+        
+        # 다운로드 강력 제한 (비디오를 위해 희생)
+        policies["download"]["priority"] = 1
+        policies["download"]["bandwidth-limit"] = 1 # 1Mbps로 제한
+        
+    # 2. 주의 단계 (로드 8M 이상)
+    elif load > 8.0:
+        print(">>> HIGH LOAD. Balancing traffic.")
+        policies["video"]["priority"] = 20
+        policies["video"]["bandwidth-limit"] = 7
+        policies["download"]["priority"] = 10
+        policies["download"]["bandwidth-limit"] = 3
+        
+    else:
+        print(">>> NETWORK STABLE. Relaxing limits.")
+
+    return list(policies.values())
+
+def push_to_ryu(policies):
+    payload = {
+        "qos-policies:qos-policies": {
+            "policy": policies
+        }
+    }
+    try:
+        r = requests.put(RYU_REST_URL, json=payload, headers=HEADERS, timeout=2)
+        if r.status_code == 200:
+            print("[RYU] Policy Updated Successfully.")
+        else:
+            print(f"[RYU ERROR] {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"[RYU FAIL] {e}")
+
 @app.route('/metrics', methods=['POST'])
-def receive_metrics():
+def handle_metrics():
     if not request.is_json:
-        return jsonify({"msg": "Missing JSON in request"}), 400
-
+        return jsonify({"error": "No JSON"}), 400
+    
     metrics = request.get_json()
-
-    # 1. 정책 결정
-    policies_to_push = decide_policy(metrics)
-
-    # 2. Ryu 로 전송
-    push_to_ryu(policies_to_push)
-
-    return jsonify({"msg": "Policies updated successfully"}), 200
-
+    new_policies = decide_policy(metrics)
+    push_to_ryu(new_policies)
+    
+    return jsonify({"status": "processed"}), 200
 
 if __name__ == '__main__':
-    print("--- Starting Decision Engine (REST Server) on port 5000 ---")
-    app.run(host='127.0.0.1', port=5000)
+    print("--- Decision Engine Started on Port 5000 ---")
+    app.run(host='0.0.0.0', port=5000)
