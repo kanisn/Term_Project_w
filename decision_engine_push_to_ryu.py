@@ -22,7 +22,7 @@ class QoSManager:
         
         # QoS 설정 상수
         self.MIN_BW = 1
-        self.MAX_BW = 5  # QoS 해제 기준
+        self.MAX_BW = 9.5  # QoS 해제 기준 (최소 360P 영상 품질 보장)
         self.PROBE_INTERVAL = 5 # 5초마다 BW 증가 시도
 
     def update(self, metrics):
@@ -66,7 +66,7 @@ class QoSManager:
             if is_loss_increasing:
                 print(">>> Loss Detected (3 sec). QoS ON. Set Download BW = 5MB.")
                 self.state = "ACTIVE"
-                self.dl_bw_limit = 5
+                self.dl_bw_limit = 5 # 최대 Bandwidth 절반으로 제한 (비디오 품질 보호 목적)
                 self.apply_policy()
                 self.last_action_time = current_time
 
@@ -102,8 +102,9 @@ class QoSManager:
                 # 다음 Probe 주기 확인은 main loop 주기에 따름 (여기선 바로 증가가 아니라 5초 주기)
                 if current_time - self.last_action_time >= self.PROBE_INTERVAL:
                     if self.dl_bw_limit >= self.MAX_BW:
-                        # 5MB 넘어가면 QoS OFF
-                        print(">>> BW > 5MB & Stable. QoS OFF.")
+                        # 9.5MB 넘어가면 QoS OFF (360P 영상은 1Mbps로 품질 보장을 위해 9.5Mbps까지는 QoS 동작 필요)
+                        # 하지만 +-1Mbps 단위로 조정하므로 실제로는 10Mbps 도달 시점에 해제
+                        print(">>> BW > 9.5MB & Stable. QoS OFF.")
                         self.reset_qos()
                     else:
                         print(">>> Probing Success. Increasing BW...")
