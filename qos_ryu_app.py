@@ -191,12 +191,14 @@ class QoSController(app_manager.RyuApp):
                 kbps = mbps_to_kbps(bw_mbps)
                 
                 bands = [parser.OFPMeterBandDrop(rate=kbps, burst_size=max(1000, int(kbps/10)))]
-                req = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_ADD, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
-                try:
-                    dp.send_msg(req)
-                except:
-                    req = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_MODIFY, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
-                    dp.send_msg(req)
+                
+                # 1. 먼저 ADD. (Meter가 없으면 생성됨)
+                req_add = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_ADD, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
+                dp.send_msg(req_add)
+
+                # 2. MODIFY. (Meter가 이미 있으면 이 명령으로 속도가 갱신됨)
+                req_mod = parser.OFPMeterMod(datapath=dp, command=ofp.OFPMC_MODIFY, flags=ofp.OFPMF_KBPS, meter_id=meter_id, bands=bands)
+                dp.send_msg(req_mod)
 
                 # 2. Flow 설정 (해당 Meter를 통과하도록 설정)
                 # 요청하신대로 Download TCP만 별도로 강력하게 제어 가능

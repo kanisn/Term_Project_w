@@ -29,7 +29,7 @@ def init_files():
     # CSV 초기화: 모드 'w'로 열어서 항상 새로 작성 (헤더 포함)
     with open(LOG_CSV_FILE, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "vid_rx_mbps", "vid_tx_mbps", "vid_loss_mbps", "vid_loss_percent", "dl_rx_mbps", "dl_tx_mbps", "delay_ms"])
+        writer.writerow(["hh:mm:ss", "Total(Mbps)", "Video(Mbps)", "Download(Mbps)", "Video_Loss_3sec_Avg(%)", "Video_loss(%)", "Estimated_Delay(ms)"])
     
     print(f"[INIT] Files initialized (CSV Header Created).")
 
@@ -78,6 +78,11 @@ def main():
                 total_load = vid_rx + dl_rx
                 delay = estimate_delay(total_load)
 
+                # 최근 비디오 로스율 및 대역폭 3개를 무빙 에버리지 수행
+                avg_vid_loss = calculate_moving_average(loss_percent, history_video_loss)
+                avg_vid_bps = calculate_moving_average(vid_rx, history_video_bps)  
+                avg_dl_bps = calculate_moving_average(dl_rx, history_dl_bps)  
+
                 # --- 2. CSV 저장 (Raw Data) ---
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 # Append 모드로 데이터 추가
@@ -85,16 +90,15 @@ def main():
                     writer = csv.writer(f)
                     writer.writerow([
                         timestamp, 
-                        round(vid_rx, 2), round(vid_tx, 2), 
-                        round(vid_loss_mbps, 3), round(loss_percent, 2),
-                        round(dl_rx, 2), round(dl_tx, 2),
+                        round(total_load, 2),
+                        round(vid_rx, 2), 
+                        round(dl_rx, 2),
+                        round(avg_vid_loss, 2), 
+                        round(loss_percent, 2),
                         round(delay, 1)
                     ])
 
-                # --- 3. JSON 저장 (Moving Average 적용) ---
-                # 요구사항 4: 최근 데이터셋 3개를 무빙 에버리지 수행
-                avg_vid_loss = calculate_moving_average(loss_percent, history_video_loss)
-                
+                # --- 3. JSON 저장 ---
                 # JSON에는 마지막(최신 평균) 데이터만 저장
                 metrics_data = {
                     "timestamp": timestamp,
@@ -102,7 +106,9 @@ def main():
                     "download_mbps": round(dl_rx, 2),
                     "video_loss_percent_ma": round(avg_vid_loss, 2), # 이동평균된 Loss
                     "raw_loss_percent": round(loss_percent, 2),      # 현재 Loss
-                    "delay_ms": round(delay, 1)
+                    "delay_ms": round(delay, 1),
+                    "video_mbps_3sec_avg": round(avg_vid_bps, 1),
+                    "download_mbps_3sec_avg": round(avg_dl_bps, 1),
                 }
 
                 with open(LOG_JSON_FILE, 'w') as f:
@@ -110,7 +116,7 @@ def main():
 
                 # --- 4. Decision Engine으로 전송 ---
                 # 모니터링 출력
-                print(f"[{timestamp}] Load:{total_load:.1f}M | VidLoss(MA):{avg_vid_loss:.1f}% | Push to Engine...")
+                print(f"[{timestamp}] ToTal Load:{total_load:.1f}M | Video(Mbps):{vid_rx:.1f} | Download(Mbps):{dl_rx:.1f}| VidLoss(MA):{avg_vid_loss:.1f}% | Push to Engine...")
                 
                 requests.post(DECISION_ENGINE_URL, json=metrics_data, timeout=1)
 
