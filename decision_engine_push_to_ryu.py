@@ -12,6 +12,7 @@ RYU_REST_URL = "http://127.0.0.1:8080/qos/qos-policies"
 HEADERS = {'Content-Type': 'application/json'}
 LOG_CSV_FILE = "decision_engine_log.csv"
 BW_OPTIMIZE_VALUE = 0.5  # Mbps
+MAX_BANDWIDTH = 10.0  # Mbps
 
 app = Flask(__name__)
 
@@ -37,7 +38,7 @@ def init_csv():
 class QoSManager:
     def __init__(self):
         self.state = "IDLE"          # 상태: IDLE, ACTIVE
-        self.dl_bw_limit = 10.0        # 현재 다운로드 대역폭 제한 (기본 10)
+        self.dl_bw_limit = MAX_BANDWIDTH    # 현재 다운로드 대역폭 제한 (기본 10)
         self.last_action_time = 0    # 마지막 QoS 동작 시간
         
         # Loss 지속 증가 확인용 히스토리
@@ -47,6 +48,8 @@ class QoSManager:
         self.MIN_BW = 1.0   # 최소 대역폭 제한 (1Mbps)
         self.MAX_BW = 9.5  # QoS 해제 기준 (최소 360P 영상 품질 보장)
         self.PROBE_INTERVAL = 3 # 5초마다 BW 증가 시도
+        
+        self.max_vid_bps_avg = 0  # 10초 이동평균 중 최대 비디오 대역폭
 
     def log_to_csv(self, timestamp, total_bps, vid_bps, dl_bps, qos_state, loss_ma, event_msg=""):
         """CSV에 현재 상태 한 줄 추가"""
@@ -78,15 +81,29 @@ class QoSManager:
         avg_vid_bps = metrics.get("video_mbps_10sec_avg", 0)
         avg_dl_bps = metrics.get("download_mbps_10sec_avg", 0)
         total_bps = vid_bps + dl_bps
-        
         # Loss 히스토리 업데이트
         self.loss_history.append(loss_ma)
         
         # 로그용 이벤트 메시지 변수
         event_msg = "-"
         
-        print(f"[ENGINE] State:{self.state} | DLBW:{self.dl_bw_limit}M | Loss(MA):{loss_ma}% | Vid:{vid_bps}M (Vid_10s_avg:{avg_vid_bps}M)")
+        print(f"[ENGINE] State:{self.state} | DLBW:{self.dl_bw_limit}M | Loss(MA):{loss_ma}% | Vid:{vid_bps}M (Vid_MAX:{self.max_vid_bps_avg}M)")
 
+        # 5. 비디오 Loss 3초간 지속 증가 확인 (높은 Loss 지속)
+        # 여기서는 Loss가 1% 이상인 상태가 3초 유지 Trigger
+        is_loss_increasing = False
+        if len(self.loss_history) == 3:
+            # 지속적으로 Loss가 있는 경우 (예: 1% 이상 지속)
+            if all(l > 1.0 for l in self.loss_history):
+                is_loss_increasing = True
+        
+        # [NEW] 이동평균 10초 중 최대 대역폭보다 20%(8->6 25%) 이상 떨어지는 경우 확인
+        is_bw_drop = False
+        if (self.max_vid_bps_avg < avg_vid_bps):
+            self.max_vid_bps_avg = avg_vid_bps
+        if vid_bps < (self.max_vid_bps_avg * 0.8):
+            is_bw_drop = True
+            
         # --- 상태 머신 로직 ---
         # 13. 트래픽 없음 (비디오 없음 OR 다운로드 없음) -> QoS OFF
         # - 비디오가 없으면 보호할 대상이 없음
@@ -98,22 +115,13 @@ class QoSManager:
                 event_msg = "QoS OFF"
                 qos_state = 0
                 self.reset_qos()
+            if vid_bps < 0.1:
+                self.max_vid_bps_avg = 0 # 비디오 트래픽이 없으면 0으로 설정
+
             # 리턴 전 로그 저장
             self.log_to_csv(timestamp_str, total_bps, vid_bps, dl_bps, qos_state, loss_ma, event_msg)
             return
 
-        # 5. 비디오 Loss 3초간 지속 증가 확인 (높은 Loss 지속)
-        # 여기서는 Loss가 1% 이상인 상태가 3초 유지 Trigger
-        is_loss_increasing = False
-        if len(self.loss_history) == 3:
-            # 지속적으로 Loss가 있는 경우 (예: 1% 이상 지속)
-            if all(l > 1.0 for l in self.loss_history):
-                is_loss_increasing = True
-        
-        # [NEW] 이동평균 10초 대역폭보다 10% 이상 떨어지는 경우 확인
-        is_bw_drop = False
-        if vid_bps < (avg_vid_bps * 0.9):
-            is_bw_drop = True
 
         # [NEW] QoS 개입 필요 여부 (Loss 증가 OR 대역폭 급감)
         need_qos_intervention = is_loss_increasing or is_bw_drop
@@ -121,9 +129,9 @@ class QoSManager:
         # === 상태별 동작 ===
         
         if self.state == "IDLE":
-            # Loss 증가 또는 대역폭 10% 이상 하락 시 -> QoS 시작
+            # Loss 증가 또는 대역폭 20% 이상 하락 시 -> QoS 시작
             if need_qos_intervention:
-                trigger_reason = "Loss Increasing" if is_loss_increasing else "BW Drop > 10%"
+                trigger_reason = "Loss Increasing" if is_loss_increasing else "BW Drop > 20%"
                 print(f">>> {trigger_reason} Detected. QoS ON. Set Download BW = 1MB.")
                 event_msg = "QoS ON (DL_BW=1MB)"
                 self.state = "ACTIVE"                
@@ -135,7 +143,6 @@ class QoSManager:
         elif self.state == "ACTIVE":
             # 3초 주기 결과 평가
             if current_time - self.last_action_time >= self.PROBE_INTERVAL:
-                # 나빠짐 -> BW 감소
                 if need_qos_intervention:
                     if self.dl_bw_limit > self.MIN_BW:
                         self.dl_bw_limit -= BW_OPTIMIZE_VALUE
@@ -143,21 +150,26 @@ class QoSManager:
                         event_msg = "DL_BW Decreased"
                         self.apply_policy()
                     else:
-                        print(">>> BW at Minimum (1MB). Maintaining.")
-                    self.last_action_time = current_time # 액션 취함
-                
-                # 괜찮음 -> BW 증가 시도
+                        print(">>> BW at Minimum (1MB). Maintaining.")            
+                    # 조정 후 타이머/카운터 리셋
+                    self.last_action_time = current_time
                 else:
                     if self.dl_bw_limit >= self.MAX_BW:
                         # 9.5MB 넘어가면 QoS OFF (360P 영상은 1Mbps로 품질 보장을 위해 9.5Mbps까지는 QoS 동작 필요)
                         print(">>> DL BW > 9.5MB & Stable. QoS OFF.")
                         event_msg = "QoS OFF" 
                         qos_state = 0
-                        self.reset_qos()
+                        self.reset_qos()         
+                        # 조정 후 타이머/카운터 리셋
+                        self.last_action_time = current_time
                     else:
-                        print(">>> Probing Success. Increasing BW...")
-                        event_msg = "DL_BW Increase"
-                        self.probe_bandwidth()
+                        # 최대 대역폭에서 비디오 사용량을 제외한 만큼만 올릴 수 있다.
+                        if (self.dl_bw_limit < (MAX_BANDWIDTH - self.max_vid_bps_avg)):
+                            print(">>> Probing Success. Increasing BW...")
+                            event_msg = "DL_BW Increase"
+                            self.probe_bandwidth() 
+                            # 조정 후 타이머/카운터 리셋
+                            self.last_action_time = current_time   
         
         # 리턴 전 로그 저장
         self.log_to_csv(timestamp_str, total_bps, vid_bps, dl_bps, qos_state, loss_ma, event_msg)
@@ -170,11 +182,11 @@ class QoSManager:
 
     def reset_qos(self):
         self.state = "IDLE"
-        self.dl_bw_limit = 10.0 # 기본 링크 속도
+        self.dl_bw_limit = MAX_BANDWIDTH # 기본 링크 속도
         # Default 정책 전송
         policies = [
-            {"name": "video", "priority": 20, "bandwidth-limit": 10.0},
-            {"name": "download", "priority": 10, "bandwidth-limit": 10.0}
+            {"name": "video", "priority": 20, "bandwidth-limit": MAX_BANDWIDTH},
+            {"name": "download", "priority": 10, "bandwidth-limit": MAX_BANDWIDTH}
         ]
         self.push_to_ryu(policies)
 
