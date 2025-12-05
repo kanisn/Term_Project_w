@@ -1,12 +1,12 @@
 [
   {
-    "timestamp": "15:18:48",
+    "timestamp": "17:05:39",
     "video_mbps": 0.0,
     "download_mbps": 0.0,
     "video_loss_percent_ma": 0.0,
     "raw_loss_percent": 0.0,
     "delay_ms": 5.0,
-    "video_mbps_3sec_avg": 0.0,
-    "download_mbps_3sec_avg": 0.0
+    "video_mbps_10sec_avg": 0.0,
+    "download_mbps_10sec_avg": 0.3
   }
 ]

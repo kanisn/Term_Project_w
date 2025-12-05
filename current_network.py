@@ -17,8 +17,10 @@ LOG_CSV_FILE = "network_traffic.csv"
 
 # Moving Average를 위한 큐 (최근 3개)
 history_video_loss = deque(maxlen=3)
-history_video_bps = deque(maxlen=3)
-history_dl_bps = deque(maxlen=3)
+
+# Moving Average를 위한 큐 (최근 10개)
+history_video_bps = deque(maxlen=10)
+history_dl_bps = deque(maxlen=10)
 
 def init_files():
     """CSV 헤더 생성 및 JSON 초기화"""
@@ -107,8 +109,8 @@ def main():
                     "video_loss_percent_ma": round(avg_vid_loss, 2), # 이동평균된 Loss
                     "raw_loss_percent": round(loss_percent, 2),      # 현재 Loss
                     "delay_ms": round(delay, 1),
-                    "video_mbps_3sec_avg": round(avg_vid_bps, 1),
-                    "download_mbps_3sec_avg": round(avg_dl_bps, 1),
+                    "video_mbps_10sec_avg": round(avg_vid_bps, 1),
+                    "download_mbps_10sec_avg": round(avg_dl_bps, 1),
                 }
 
                 with open(LOG_JSON_FILE, 'w') as f:

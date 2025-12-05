@@ -15,9 +15,9 @@ TARGET_PORT = 5001
 # 화질별 비트레이트 설정 (해상도, 비트레이트 bps)
 QUALITIES = [
     ("360p (Low)",   1_000_000),  # 1 Mbps
-    ("480p (SD)",    2_500_000),  # 2.5 Mbps
-    ("720p (HD)",    4_000_000),  # 4 Mbps
-    ("1080p (FHD)",  6_000_000)   # 6 Mbps (최대)
+    ("480p (SD)",    3_00_000),   # 3 Mbps
+    ("720p (HD)",    6_000_000),  # 6 Mbps
+    ("1080p (FHD)",  8_000_000)   # 8 Mbps (최대)
 ]
 
 def run_abr_simulation(duration_sec=60):
