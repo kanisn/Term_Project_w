@@ -85,7 +85,7 @@ class QoSController(app_manager.RyuApp):
         
         # 2. 모니터링용 Flow 설치 (Priority 5)
         # 통계 수집을 위해 트래픽을 구분하지만, 동작은 Normal Forwarding
-        match_video = parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_dst=5001)
+        match_video = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5001)
         self.add_flow(dp, 5, match_video, actions_normal)
 
         match_download = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5002)
@@ -128,8 +128,8 @@ class QoSController(app_manager.RyuApp):
 
         # 모든 Flow Entry 통계 합산 (Priority 5 + Priority 100 QoS Flow)
         for stat in body:
-            # Video (UDP 5001)
-            if (stat.match.get('ip_proto') == 17 and stat.match.get('udp_dst') == 5001):
+            # Video (TCP ABR 5001)
+            if (stat.match.get('ip_proto') == 6 and stat.match.get('tcp_dst') == 5001):
                 vid_pkts += stat.packet_count
                 vid_bytes += stat.byte_count
             
@@ -201,7 +201,7 @@ class QoSController(app_manager.RyuApp):
                 # 2. Flow 설정 (해당 Meter를 통과하도록 설정)
                 # 요청하신대로 Download TCP만 별도로 강력하게 제어 가능
                 if name == "video":
-                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, udp_dst=5001)
+                    match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5001)
                 elif name == "download":
                     match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, tcp_dst=5002)
                 else:
