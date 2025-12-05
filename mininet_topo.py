@@ -72,11 +72,14 @@ def video_download_topology():
     # h1, h2가 데이터를 받을 준비를 합니다.
     info('*** Starting iperf servers (Receivers) on h1 (video user) and h2 (download user)\n')
     
-    # h1 (Video User): UDP 수신 대기 (Port 5001)
-    # -s: Server mode (수신)
-    # -u: UDP
-    # -p 5001: Port 5001
-    h1.cmd('nohup iperf -s -u -p 5001 > /tmp/iperf_h1.log 2>&1 &')
+    # h1 (Video User): TCP ABR 수신 대기 (Port 5001)
+    # nc: netcat 명령어
+    # # -l: Listen (서버 모드)
+    # # -k: Keep-alive (연결이 끊겨도 서버를 끄지 않고 계속 대기)
+    # # -p 5001: 5001번 포트 사용
+    # # > /dev/null: 받는 데이터는 저장하지 않고 바로 삭제
+    h1.cmd('nohup nc -lk -p 5001 > /dev/null 2>&1 &')
+    #h1.cmd('nohup iperf -s -p 5001 > /tmp/iperf_h1.log 2>&1 &')
     
     # h2 (Download User): TCP 수신 대기 (Port 5002)
     # -s: Server mode (수신)
@@ -84,7 +87,7 @@ def video_download_topology():
     h2.cmd('nohup iperf -s -p 5002 > /tmp/iperf_h2.log 2>&1 &')
 
     info('*** iperf receivers started:\n')
-    info('    - h1 (Video User):   Listening UDP on port 5001\n')
+    info('    - h1 (Video User):   Listening TCP ABR on port 5001\n')
     info('    - h2 (Download User): Listening TCP on port 5002\n')
 
     info('*** Network is ready. Use "xterm vSrv dSrv" to generate traffic.\n')
