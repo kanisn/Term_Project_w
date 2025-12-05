@@ -40,10 +40,13 @@ def run_simulation():
                 if not dur.isdigit():
                     print("숫자를 입력해주세요.")
                     continue
+                # [수정] -P 10 옵션 추가: 10개의 병렬 연결로 대역폭 강제 점유
+                print(f"\n[INFO] 공격적 다운로드 시작... ({dur}초, 병렬 연결 10개)")
+                # -c: Client, -p: Port, -t: Time, -i: Interval -P: Parallel
+                os.system(f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t {dur} -P 10 -i 1") # 여기를 수정
 
-                print(f"\n[INFO] 일반 다운로드 시작... ({dur}초, TCP 최대 속도)")
-                # -c: Client, -p: Port, -t: Time, -i: Interval
-                os.system(f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t {dur} -i 1")
+                #print(f"\n[INFO] 일반 다운로드 시작... ({dur}초, TCP 최대 속도)")
+                #os.system(f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t {dur} -i 1")
 
             except KeyboardInterrupt:
                 print("\n\n[STOP] 다운로드를 중지합니다.")
@@ -58,9 +61,13 @@ def run_simulation():
 
                 # 사용자가 강제로 끌 때까지 무한 반복
                 while True:
-                    # -t 5: 5초 동안 테스트, 끝나면 다시 바로 시작 (끊김 없는 부하 유지)
-                    cmd = f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t 5 -i 1"
+                    # [수정] -P 10 옵션 추가
+                    cmd = f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t 5 -P 10 -i 1" # 여기를 수정
                     os.system(cmd)
+                    
+                    # -t 5: 5초 동안 테스트, 끝나면 다시 바로 시작 (끊김 없는 부하 유지)
+                    #cmd = f"iperf -c {TARGET_IP} -p {TARGET_PORT} -t 5 -i 1"
+                    #os.system(cmd)
 
             except KeyboardInterrupt:
                 print("\n\n[STOP] 지속 다운로드를 중지합니다.")

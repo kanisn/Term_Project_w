@@ -103,7 +103,7 @@ class QoSManager:
             self.max_vid_bps_avg = avg_vid_bps
         if vid_bps < (self.max_vid_bps_avg * 0.8):
             is_bw_drop = True
-            
+
         # --- 상태 머신 로직 ---
         # 13. 트래픽 없음 (비디오 없음 OR 다운로드 없음) -> QoS OFF
         # - 비디오가 없으면 보호할 대상이 없음
@@ -125,7 +125,7 @@ class QoSManager:
 
         # [NEW] QoS 개입 필요 여부 (Loss 증가 OR 대역폭 급감)
         need_qos_intervention = is_loss_increasing or is_bw_drop
-
+        #need_qos_intervention = False
         # === 상태별 동작 ===
         
         if self.state == "IDLE":
