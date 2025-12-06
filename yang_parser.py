@@ -6,29 +6,31 @@ from pyang.repository import FileRepository
 YANG_FILE = "qos-policy.yang"
 YANG_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# YANG 트리 구조를 들여쓰기 형태로 출력한다. (node.arg 를 우선 사용)
+
+# Print the YANG tree structure with indentation (preferring node.arg)
 def print_yang_tree(node, indent=0):
     prefix = "  " * indent
     name = getattr(node, "i_yang_name", None) or getattr(node, "arg", "(unknown)")
-    print(f"{prefix}- {node.keyword}: {name}")  # node.keyword: container, list, leaf, module 등 유형
+    print(f"{prefix}- {node.keyword}: {name}")  # node.keyword examples: container, list, leaf, module
 
-    # 자식 노드를 재귀적으로 출력
+    # Recursively print child nodes
     children = getattr(node, "i_children", None)
     if children:
         for child in children:
             print_yang_tree(child, indent + 1)
     else:
-        # i_children 가 없으면 substmts 를 순회
+        # Fall back to substmts when i_children is absent
         substmts = getattr(node, "substmts", None)
         if substmts:
             for child in substmts:
                 print_yang_tree(child, indent + 1)
 
-# YANG 파일을 파싱하고 트리를 출력한 뒤 leaf 이름을 수집한다.
+
+# Parse the YANG file, print the tree, and collect leaf names under the policy list
 def get_required_policy_keys():
     """
-    pyang 으로 qos-policy.yang 을 읽어 policy 리스트 안의 leaf 이름을 모두 추출하고
-    모듈의 트리 구조를 콘솔에 출력한다.
+    Read qos-policy.yang with pyang, print the module tree, and collect the leaf names
+    inside the 'policy' list. Returns a set of required keys.
     """
     required_keys = set()
 
@@ -36,7 +38,7 @@ def get_required_policy_keys():
     ctx = Context(repos)
     yang_file_path = os.path.join(YANG_DIR, YANG_FILE)
 
-    # 1단계: YANG 파일을 읽는다. 파일이 없으면 빈 집합을 반환한다.
+    # Step 1: Read YANG file. Return empty set if missing.
     try:
         with open(yang_file_path, 'r', encoding='utf-8') as f:
             yang_content = f.read()
@@ -44,7 +46,7 @@ def get_required_policy_keys():
         print(f"[YANG PARSER ERROR] File not found: {yang_file_path}")
         return required_keys
 
-    # 2단계: pyang Context로 모듈을 추가하고 검증한다.
+    # Step 2: Add module to pyang Context and validate.
     try:
         module = ctx.add_module(YANG_FILE, yang_content)
         ctx.validate()
@@ -57,12 +59,12 @@ def get_required_policy_keys():
         print(f"[YANG PARSER ERROR] Module {YANG_FILE} is empty.")
         return required_keys
 
-    # 3단계: 모듈의 substmts를 순회하며 전체 문법 트리를 출력한다.
+    # Step 3: Traverse substatements to print full grammar tree.
     print("\n[YANG TREE STRUCTURE]")
-    for child in module.substmts:  # substmts 를 사용해 전체 구조를 확인
+    for child in module.substmts:  # Use substmts to inspect the entire structure
         print_yang_tree(child, indent=1)
 
-    # 4단계: qos-policies 컨테이너 노드를 찾는다.
+    # Step 4: Find the qos-policies container node.
     qos_policies_node = next(
         (n for n in module.substmts if getattr(n, 'arg', None) == 'qos-policies'),
         None
@@ -71,7 +73,7 @@ def get_required_policy_keys():
         print("[YANG PARSER WARNING] 'qos-policies' container not found or is not a container.")
         return required_keys
 
-    # 5단계: qos-policies 아래에서 policy 리스트 노드를 찾는다.
+    # Step 5: Find the policy list node under qos-policies.
     policy_list_node = next(
         (n for n in qos_policies_node.substmts if getattr(n, 'arg', None) == 'policy'),
         None
@@ -80,7 +82,7 @@ def get_required_policy_keys():
         print("[YANG PARSER WARNING] 'policy' list not found or is not a list.")
         return required_keys
 
-    # 6단계: policy 리스트의 leaf 노드 이름을 모두 수집한다.
+    # Step 6: Collect leaf node names inside the policy list.
     for node in policy_list_node.substmts:
         if node.keyword == 'leaf':
             required_keys.add(node.arg)

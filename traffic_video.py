@@ -1,19 +1,18 @@
 import socket
 import time
 import math
-import os
 
-# --- 설정 ---
+# --- Configuration ---
 TARGET_IP = "10.0.0.1"
 TARGET_PORT = 5001
 
 
 def send_video_like_udp(mbps, duration, fps=30, pkt_size=1200):
     """
-    실비디오 패턴 (Frame-Based Traffic)
-    duration(초) 동안 정상적으로 끝나도록 수정
+    Simulate frame-based UDP video traffic.
+    Ensures the stream completes cleanly within the given duration (seconds).
     """
-    duration = int(duration) 
+    duration = int(duration)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     payload = b'x' * pkt_size
@@ -47,23 +46,23 @@ def print_menu():
     print("      VIDEO Streaming Generator (vSrv)     ")
     print("===========================================")
     print(f"Target: {TARGET_IP}:{TARGET_PORT} (UDP)")
-    print("실제 비디오 스트리밍과 유사한 UDP 트래픽을 전송합니다.")
+    print("Sends UDP traffic that mimics real video streaming.")
     print("-------------------------------------------")
     print("1. 360p  (SD)   - 1 Mbps")
     print("2. 720p  (HD)   - 3 Mbps")
     print("3. 1080p (FHD)  - 6 Mbps")
     print("4. 4K    (UHD)  - 15 Mbps")
-    print("0. 종료")
+    print("0. Exit")
     print("===========================================")
 
 
 def run_simulation():
     while True:
         print_menu()
-        choice = input("화질을 선택하세요 >> ")
+        choice = input("Select quality >> ")
 
         if choice == '0':
-            print("프로그램을 종료합니다.")
+            print("Exiting program.")
             break
 
         if choice == '1':
@@ -79,23 +78,23 @@ def run_simulation():
             mbps = 15
             quality_name = "4K (UHD)"
         else:
-            print("잘못된 입력입니다.")
+            print("Invalid input.")
             continue
 
-        duration = input("재생 시간(초)을 입력하세요 (기본 30초): ")
+        duration = input("Enter playback duration (seconds) (default 30): ")
         if duration.strip() == "":
-            duration = 30  # 기본값
+            duration = 30  # Default
 
-        print(f"\n[INFO] '{quality_name}' 스트리밍 시작 ({mbps} Mbps, {duration}초)")
-        print(f"[INFO] Receiver: h1에서 'iperf -s -u -p 5001' 필요")
+        print(f"\n[INFO] Starting '{quality_name}' stream ({mbps} Mbps, {duration} sec)")
+        print(f"[INFO] Receiver: h1 should run 'iperf -s -u -p 5001'")
 
         try:
             send_video_like_udp(mbps, int(duration))
         except Exception as e:
             print(f"[ERROR] {e}\n")
 
-        # 스트리밍이 끝났으면 다시 메뉴로 돌아감
-        print("[INFO] 스트리밍 완료 → 메뉴로 돌아갑니다.\n")
+        # Return to menu after streaming completes
+        print("[INFO] Streaming finished → returning to menu.\n")
 
 
 if __name__ == "__main__":

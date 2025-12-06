@@ -3,43 +3,44 @@
 
 import json
 import time
-import os
 import requests
 import csv
 from datetime import datetime
 from collections import deque
 
-# 설정
+# Configuration
 RYU_STATS_URL = "http://127.0.0.1:8080/stats"
 DECISION_ENGINE_URL = "http://127.0.0.1:5000/metrics"
 LOG_JSON_FILE = "latest_metrics.json"
 LOG_CSV_FILE = "network_traffic.csv"
 
-# Moving Average를 위한 큐 (최근 3개)
+# Queues for moving averages (last 3 samples)
 history_video_loss = deque(maxlen=3)
 
-# Moving Average를 위한 큐 (최근 10개)
+# Queues for moving averages (last 10 samples)
 history_video_bps = deque(maxlen=10)
 history_dl_bps = deque(maxlen=10)
 
+
 def init_files():
-    """CSV 헤더 생성 및 JSON 초기화"""
-    # JSON 초기화
+    """Create CSV header and initialize JSON file."""
+    # Initialize JSON
     with open(LOG_JSON_FILE, 'w') as f:
         json.dump([], f)
-    
-    # CSV 초기화: 모드 'w'로 열어서 항상 새로 작성 (헤더 포함)
+
+    # Initialize CSV: always start fresh with header
     with open(LOG_CSV_FILE, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["hh:mm:ss", "Total(Mbps)", "Video(Mbps)", "Download(Mbps)", "Video_Loss_3sec_Avg(%)", "Video_loss(%)", "Estimated_Delay(ms)"])
-    
+
     print(f"[INIT] Files initialized (CSV Header Created).")
 
+
 def estimate_delay(traffic_load_mbps):
-    """트래픽 부하에 따른 지연시간 추정 (10Mbps 링크 기준)"""
+    """Estimate delay based on traffic load (assuming 10 Mbps link)."""
     LINK_CAPACITY = 10.0
     base_delay = 5.0
-    
+
     if traffic_load_mbps >= LINK_CAPACITY:
         return 500.0 + (traffic_load_mbps - LINK_CAPACITY) * 100
     elif traffic_load_mbps > LINK_CAPACITY * 0.9:
@@ -48,31 +49,33 @@ def estimate_delay(traffic_load_mbps):
     else:
         return base_delay + (traffic_load_mbps * 2)
 
+
 def calculate_moving_average(value, queue):
-    """새 값을 큐에 넣고 평균을 반환"""
+    """Append a new value to the queue and return its average."""
     queue.append(value)
     return sum(queue) / len(queue)
+
 
 def main():
     init_files()
     print(f"--- Monitoring & Parsing Started ---")
-    
+
     while True:
         try:
-            # 1. Ryu 통계 수집
+            # 1. Collect statistics from Ryu
             res = requests.get(RYU_STATS_URL, timeout=1)
             if res.status_code == 200:
                 raw = res.json()
-                
-                # --- 데이터 가공 (bps -> Mbps) ---
+
+                # --- Data processing (bps -> Mbps) ---
                 vid_rx = raw.get('video_bps', 0) / 1e6
                 vid_tx = raw.get('video_tx_bps', 0) / 1e6
                 dl_rx = raw.get('download_bps', 0) / 1e6
                 dl_tx = raw.get('download_tx_bps', 0) / 1e6
-                
+
                 vid_loss_mbps = raw.get('video_loss', 0) / 1e6
-                
-                # Loss % 계산
+
+                # Calculate loss percentage
                 loss_percent = 0.0
                 if vid_tx > 0:
                     loss_percent = (vid_loss_mbps / vid_tx) * 100
@@ -80,34 +83,34 @@ def main():
                 total_load = vid_rx + dl_rx
                 delay = estimate_delay(total_load)
 
-                # 최근 비디오 로스율 및 대역폭 3개를 무빙 에버리지 수행
+                # Moving averages for recent video loss and bandwidth (3 and 10 samples)
                 avg_vid_loss = calculate_moving_average(loss_percent, history_video_loss)
-                avg_vid_bps = calculate_moving_average(vid_rx, history_video_bps)  
-                avg_dl_bps = calculate_moving_average(dl_rx, history_dl_bps)  
+                avg_vid_bps = calculate_moving_average(vid_rx, history_video_bps)
+                avg_dl_bps = calculate_moving_average(dl_rx, history_dl_bps)
 
-                # --- 2. CSV 저장 (Raw Data) ---
+                # --- 2. Save CSV (raw data) ---
                 timestamp = datetime.now().strftime("%H:%M:%S")
-                # Append 모드로 데이터 추가
+                # Append new row
                 with open(LOG_CSV_FILE, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([
-                        timestamp, 
+                        timestamp,
                         round(total_load, 2),
-                        round(vid_rx, 2), 
+                        round(vid_rx, 2),
                         round(dl_rx, 2),
-                        round(avg_vid_loss, 2), 
+                        round(avg_vid_loss, 2),
                         round(loss_percent, 2),
                         round(delay, 1)
                     ])
 
-                # --- 3. JSON 저장 ---
-                # JSON에는 마지막(최신 평균) 데이터만 저장
+                # --- 3. Save JSON ---
+                # JSON stores only the latest averaged data
                 metrics_data = {
                     "timestamp": timestamp,
                     "video_mbps": round(vid_rx, 2),
                     "download_mbps": round(dl_rx, 2),
-                    "video_loss_percent_ma": round(avg_vid_loss, 2), # 이동평균된 Loss
-                    "raw_loss_percent": round(loss_percent, 2),      # 현재 Loss
+                    "video_loss_percent_ma": round(avg_vid_loss, 2),  # Moving-average loss
+                    "raw_loss_percent": round(loss_percent, 2),      # Instantaneous loss
                     "delay_ms": round(delay, 1),
                     "video_mbps_10sec_avg": round(avg_vid_bps, 1),
                     "download_mbps_10sec_avg": round(avg_dl_bps, 1),
@@ -116,10 +119,10 @@ def main():
                 with open(LOG_JSON_FILE, 'w') as f:
                     json.dump([metrics_data], f, indent=2)
 
-                # --- 4. Decision Engine으로 전송 ---
-                # 모니터링 출력
-                print(f"[{timestamp}] ToTal Load:{total_load:.1f}M | Video(Mbps):{vid_rx:.1f} | Download(Mbps):{dl_rx:.1f}| VidLoss(MA):{avg_vid_loss:.1f}% | Push to Engine...")
-                
+                # --- 4. Send to Decision Engine ---
+                # Monitoring output
+                print(f"[{timestamp}] Total Load:{total_load:.1f}M | Video(Mbps):{vid_rx:.1f} | Download(Mbps):{dl_rx:.1f}| VidLoss(MA):{avg_vid_loss:.1f}% | Push to Engine...")
+
                 requests.post(DECISION_ENGINE_URL, json=metrics_data, timeout=1)
 
             time.sleep(1)
@@ -127,6 +130,7 @@ def main():
         except Exception as e:
             print(f"[ERROR] {e}")
             time.sleep(1)
+
 
 if __name__ == "__main__":
     main()
