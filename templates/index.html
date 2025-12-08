@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Network Control Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Network Control Dashboard</h1>
+      <p>Launch controllers, watch debug output, and monitor live traffic.</p>
+    </header>
+    <main class="grid">
+      <section class="left">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>qos_ryu_app.py</h2>
+              <p>Start the QoS Ryu application.</p>
+            </div>
+            <button onclick="startScript('qos_ryu_app')">Run</button>
+          </div>
+          <pre id="log-qos_ryu_app" class="log-box"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>mininet_topo.py</h2>
+              <p>Launch the Mininet topology.</p>
+            </div>
+            <button onclick="startScript('mininet_topo')">Run</button>
+          </div>
+          <pre id="log-mininet_topo" class="log-box"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>decision_engine_push_to_ryu.py</h2>
+              <p>Start the decision engine and push updates to Ryu.</p>
+            </div>
+            <button onclick="startScript('decision_engine_push_to_ryu')">Run</button>
+          </div>
+          <pre id="log-decision_engine_push_to_ryu" class="log-box"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>current_network.py</h2>
+              <p>Collect current network state.</p>
+            </div>
+            <button onclick="startScript('current_network')">Run</button>
+          </div>
+          <pre id="log-current_network" class="log-box"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>traffic_video_abr.py (vSvr)</h2>
+              <p>Enable adaptive video traffic and toggle streaming.</p>
+            </div>
+            <div class="button-group">
+              <button onclick="readyTraffic('traffic_video_abr')">Run</button>
+              <button id="video-on" onclick="toggleVideo(true)" disabled>Video Traffic ON</button>
+              <button id="video-off" onclick="toggleVideo(false)" disabled>Video Traffic OFF</button>
+            </div>
+          </div>
+          <pre id="log-traffic_video_abr" class="log-box"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>traffic_file.py (dSvr)</h2>
+              <p>Enable download traffic and toggle transfers.</p>
+            </div>
+            <div class="button-group">
+              <button onclick="readyTraffic('traffic_file')">Run</button>
+              <button id="download-on" onclick="toggleDownload(true)" disabled>Download Traffic ON</button>
+              <button id="download-off" onclick="toggleDownload(false)" disabled>Download Traffic OFF</button>
+            </div>
+          </div>
+          <pre id="log-traffic_file" class="log-box"></pre>
+        </div>
+      </section>
+
+      <section class="right">
+        <div class="card status-card">
+          <div class="status-header">
+            <h2>QoS Status</h2>
+            <span id="qos-status" class="badge">IDLE</span>
+          </div>
+          <p>The backend checks the Ryu QoS process to show whether QoS is ACTIVE or IDLE.</p>
+        </div>
+
+        <div class="card">
+          <div class="status-header">
+            <h2>Traffic Monitor</h2>
+            <span class="hint">Updated every second from backend metrics</span>
+          </div>
+          <canvas id="traffic-chart" height="180"></canvas>
+        </div>
+
+        <div class="card">
+          <div class="status-header">
+            <h2>Decision Engine CSV Snapshot</h2>
+            <span class="hint">Loaded from decision_engine_log.csv</span>
+          </div>
+          <div id="decision-table" class="table-scroll"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

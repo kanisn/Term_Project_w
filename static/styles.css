@@ -1,0 +1,152 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #0b1221;
+  color: #e7ecf5;
+}
+
+header {
+  padding: 16px 20px;
+  background: linear-gradient(90deg, #15213a, #1b2b47);
+  border-bottom: 1px solid #243556;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+header p {
+  margin: 6px 0 0;
+  color: #9bb2d6;
+}
+
+main.grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  padding: 16px;
+}
+
+@media (max-width: 1024px) {
+  main.grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card {
+  background: #11182b;
+  border: 1px solid #1f2c48;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.card p {
+  margin: 2px 0 0;
+  color: #9bb2d6;
+}
+
+button {
+  background: #2b7fff;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(43, 127, 255, 0.4);
+}
+
+button:disabled {
+  background: #465b85;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.button-group {
+  display: flex;
+  gap: 8px;
+}
+
+.log-box {
+  background: #0b1020;
+  color: #d9e5ff;
+  height: 160px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #1c2943;
+  margin-top: 8px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  white-space: pre-wrap;
+}
+
+.status-card {
+  position: sticky;
+  top: 12px;
+}
+
+.status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+  background: #243556;
+}
+
+.badge.active {
+  background: #1fa28a;
+  color: #043329;
+}
+
+.hint {
+  color: #9bb2d6;
+  font-size: 12px;
+}
+
+.table-scroll {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #1c2943;
+  border-radius: 8px;
+  padding: 8px;
+  background: #0b1020;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 12px;
+}
+
+.table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-scroll th,
+.table-scroll td {
+  border: 1px solid #1c2943;
+  padding: 4px 6px;
+}
