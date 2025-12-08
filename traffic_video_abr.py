@@ -13,8 +13,8 @@ TARGET_PORT = 5001
 # Bitrate settings per quality (resolution, bitrate in bps)
 QUALITIES = [
     ("360p (Low)",   1_000_000),  # 1 Mbps
-    ("480p (SD)",    3_000_000),  # 3 Mbps
-    ("720p (HD)",    6_000_000),  # 6 Mbps
+    ("480p (SD)",    2_500_000),  # 2.5 Mbps
+    ("720p (HD)",    5_000_000),  # 5 Mbps
     ("1080p (FHD)",  8_000_000)   # 8 Mbps (max)
 ]
 
