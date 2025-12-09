@@ -77,6 +77,7 @@ class QoSManager:
         # Extract values from metrics
         # current_network.py sends the moving average 'video_loss_percent_ma'
         loss_ma = metrics.get("video_loss_percent_ma", 0)
+        loss = metrics.get("raw_loss_percent", 0)
         vid_bps = metrics.get("video_mbps", 0)
         dl_bps = metrics.get("download_mbps", 0)
         avg_vid_bps = metrics.get("video_mbps_10sec_avg", 0)
@@ -84,7 +85,7 @@ class QoSManager:
         total_bps = vid_bps + dl_bps
 
         # Update loss history
-        self.loss_history.append(loss_ma)
+        self.loss_history.append(loss)
 
         # Event message placeholder for logging
         event_msg = "-"
@@ -103,7 +104,8 @@ class QoSManager:
         is_bw_drop = False
         if (self.max_vid_bps_avg < avg_vid_bps):
             self.max_vid_bps_avg = avg_vid_bps
-        if vid_bps < (self.max_vid_bps_avg * 0.8):
+
+        if (vid_bps < (self.max_vid_bps_avg * 0.8)) or ((vid_bps > 0) and dl_bps > 9.0):
             is_bw_drop = True
 
         # --- State machine ---
@@ -111,7 +113,7 @@ class QoSManager:
         # - No video means there is nothing to protect
         # - No download means there is no congestion source
         # -> If either is below 0.1 Mbps, QoS is unnecessary
-        if vid_bps < 0.1 or dl_bps < 0.1:
+        if (total_bps < (MAX_BANDWIDTH / 2)):
             if self.state != "IDLE":
                 print(">>> Traffic Missing (Video or Download). Reset QoS.")
                 event_msg = "QoS OFF"
@@ -123,9 +125,9 @@ class QoSManager:
             # Save log before returning
             self.log_to_csv(timestamp_str, total_bps, vid_bps, dl_bps, qos_state, loss_ma, event_msg)
             return
-
-        # Determine whether QoS intervention is needed (loss increase OR bandwidth drop)
-        need_qos_intervention = is_loss_increasing or is_bw_drop
+        else:
+            # Determine whether QoS intervention is needed (loss increase OR bandwidth drop)
+            need_qos_intervention = is_loss_increasing or is_bw_drop
 
         if self.state == "IDLE":
             # Start QoS when loss increases or bandwidth drops more than 20%
